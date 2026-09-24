@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+    <Compile Remove="benchmarks\**\*.cs" />
   </ItemGroup>
 
 </Project>

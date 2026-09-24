@@ -1,4 +1,5 @@
 using System.IO;
+using FindHistory.Models;
 
 namespace FindHistory.Services;
 
@@ -43,22 +44,30 @@ public sealed class RecentItemsMonitor : IDisposable
         await _scanGate.WaitAsync();
         try
         {
-            var count = 0;
-            foreach (var path in Directory.EnumerateFiles(_recentFolder, "*.*", SearchOption.TopDirectoryOnly)
-                         .Where(IsSupportedShortcut))
-            {
-                if (await CaptureAsync(path))
-                {
-                    count++;
-                }
-            }
+            var items = await Task.Run(ResolveExistingItems);
+            await _database.UpsertManyAsync(items);
             HistoryChanged?.Invoke(this, EventArgs.Empty);
-            return count;
+            return items.Count;
         }
         finally
         {
             _scanGate.Release();
         }
+    }
+
+    private List<RecentItemCandidate> ResolveExistingItems()
+    {
+        var items = new List<RecentItemCandidate>();
+        foreach (var path in Directory.EnumerateFiles(_recentFolder, "*.*", SearchOption.TopDirectoryOnly)
+                     .Where(IsSupportedShortcut))
+        {
+            var item = _resolver.Resolve(path);
+            if (item is not null)
+            {
+                items.Add(item);
+            }
+        }
+        return items;
     }
 
     private async void OnShortcutChanged(object sender, FileSystemEventArgs e)

@@ -7,7 +7,32 @@ public sealed class RecentDatabase
 {
     private string _connectionString;
     private string _databasePath;
+    private bool _ftsAvailable;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
+
+    private const string UpsertSql = """
+        INSERT INTO recent_items (
+            target_path, display_name, extension, item_kind, source_link_path,
+            first_seen_utc, last_seen_utc, last_link_write_utc, open_count, exists_flag)
+        VALUES (
+            $targetPath, $displayName, $extension, $itemKind, $sourceLinkPath,
+            $seenUtc, $seenUtc, $linkWriteUtc, 1, $exists)
+        ON CONFLICT(target_path) DO UPDATE SET
+            display_name = excluded.display_name,
+            extension = excluded.extension,
+            item_kind = excluded.item_kind,
+            source_link_path = excluded.source_link_path,
+            last_seen_utc = CASE
+                WHEN excluded.last_seen_utc > recent_items.last_seen_utc
+                THEN excluded.last_seen_utc ELSE recent_items.last_seen_utc END,
+            open_count = recent_items.open_count + CASE
+                WHEN excluded.last_link_write_utc > recent_items.last_link_write_utc
+                THEN 1 ELSE 0 END,
+            last_link_write_utc = CASE
+                WHEN excluded.last_link_write_utc > recent_items.last_link_write_utc
+                THEN excluded.last_link_write_utc ELSE recent_items.last_link_write_utc END,
+            exists_flag = excluded.exists_flag;
+        """;
 
     public RecentDatabase(string databasePath)
     {
@@ -68,6 +93,7 @@ public sealed class RecentDatabase
                 ON recent_items(display_name COLLATE NOCASE);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        _ftsAvailable = await EnsureSearchIndexAsync(connection, cancellationToken);
     }
 
     public async Task UpsertAsync(RecentItemCandidate item)
@@ -76,39 +102,36 @@ public sealed class RecentDatabase
         try
         {
             await using var connection = await OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                INSERT INTO recent_items (
-                    target_path, display_name, extension, item_kind, source_link_path,
-                    first_seen_utc, last_seen_utc, last_link_write_utc, open_count, exists_flag)
-                VALUES (
-                    $targetPath, $displayName, $extension, $itemKind, $sourceLinkPath,
-                    $seenUtc, $seenUtc, $linkWriteUtc, 1, $exists)
-                ON CONFLICT(target_path) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    extension = excluded.extension,
-                    item_kind = excluded.item_kind,
-                    source_link_path = excluded.source_link_path,
-                    last_seen_utc = CASE
-                        WHEN excluded.last_seen_utc > recent_items.last_seen_utc
-                        THEN excluded.last_seen_utc ELSE recent_items.last_seen_utc END,
-                    open_count = recent_items.open_count + CASE
-                        WHEN excluded.last_link_write_utc > recent_items.last_link_write_utc
-                        THEN 1 ELSE 0 END,
-                    last_link_write_utc = CASE
-                        WHEN excluded.last_link_write_utc > recent_items.last_link_write_utc
-                        THEN excluded.last_link_write_utc ELSE recent_items.last_link_write_utc END,
-                    exists_flag = excluded.exists_flag;
-                """;
-            command.Parameters.AddWithValue("$targetPath", item.TargetPath);
-            command.Parameters.AddWithValue("$displayName", item.DisplayName);
-            command.Parameters.AddWithValue("$extension", item.Extension);
-            command.Parameters.AddWithValue("$itemKind", item.ItemKind);
-            command.Parameters.AddWithValue("$sourceLinkPath", item.SourceLinkPath);
-            command.Parameters.AddWithValue("$seenUtc", item.LinkWriteTime.UtcDateTime.ToString("O"));
-            command.Parameters.AddWithValue("$linkWriteUtc", item.LinkWriteTime.UtcDateTime.ToString("O"));
-            command.Parameters.AddWithValue("$exists", item.Exists ? 1 : 0);
+            await using var command = CreateUpsertCommand(connection);
+            BindUpsertParameters(command, item);
             await command.ExecuteNonQueryAsync();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task UpsertManyAsync(IReadOnlyCollection<RecentItemCandidate> items,
+        CancellationToken cancellationToken = default)
+    {
+        if (items.Count == 0)
+        {
+            return;
+        }
+
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = CreateUpsertCommand(connection, (SqliteTransaction)transaction);
+            foreach (var item in items)
+            {
+                BindUpsertParameters(command, item);
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
         }
         finally
         {
@@ -130,10 +153,21 @@ public sealed class RecentDatabase
 
             var conditions = new List<string>();
             var tokens = searchText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            for (var i = 0; i < tokens.Length; i++)
+            var ftsQuery = BuildFtsQuery(tokens);
+            var useFts = ftsQuery is not null && _ftsAvailable &&
+                         await IsSelectiveFtsQueryAsync(connection, ftsQuery, limit, cancellationToken);
+            if (useFts)
             {
-                conditions.Add($"(display_name LIKE $query{i} ESCAPE '\\' OR target_path LIKE $query{i} ESCAPE '\\')");
-                command.Parameters.AddWithValue($"$query{i}", $"%{EscapeLike(tokens[i])}%");
+                conditions.Add("id IN (SELECT rowid FROM recent_items_fts WHERE recent_items_fts MATCH $ftsQuery)");
+                command.Parameters.AddWithValue("$ftsQuery", ftsQuery!);
+            }
+            else
+            {
+                for (var i = 0; i < tokens.Length; i++)
+                {
+                    conditions.Add($"(display_name LIKE $query{i} ESCAPE '\\' OR target_path LIKE $query{i} ESCAPE '\\')");
+                    command.Parameters.AddWithValue($"$query{i}", $"%{EscapeLike(tokens[i])}%");
+                }
             }
 
             if (since is not null)
@@ -297,6 +331,118 @@ public sealed class RecentDatabase
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         return connection;
+    }
+
+    private static SqliteCommand CreateUpsertCommand(SqliteConnection connection,
+        SqliteTransaction? transaction = null)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = UpsertSql;
+        command.Parameters.Add("$targetPath", SqliteType.Text);
+        command.Parameters.Add("$displayName", SqliteType.Text);
+        command.Parameters.Add("$extension", SqliteType.Text);
+        command.Parameters.Add("$itemKind", SqliteType.Text);
+        command.Parameters.Add("$sourceLinkPath", SqliteType.Text);
+        command.Parameters.Add("$seenUtc", SqliteType.Text);
+        command.Parameters.Add("$linkWriteUtc", SqliteType.Text);
+        command.Parameters.Add("$exists", SqliteType.Integer);
+        command.Prepare();
+        return command;
+    }
+
+    private static void BindUpsertParameters(SqliteCommand command, RecentItemCandidate item)
+    {
+        command.Parameters["$targetPath"].Value = item.TargetPath;
+        command.Parameters["$displayName"].Value = item.DisplayName;
+        command.Parameters["$extension"].Value = item.Extension;
+        command.Parameters["$itemKind"].Value = item.ItemKind;
+        command.Parameters["$sourceLinkPath"].Value = item.SourceLinkPath;
+        command.Parameters["$seenUtc"].Value = item.LinkWriteTime.UtcDateTime.ToString("O");
+        command.Parameters["$linkWriteUtc"].Value = item.LinkWriteTime.UtcDateTime.ToString("O");
+        command.Parameters["$exists"].Value = item.Exists ? 1 : 0;
+    }
+
+    private static async Task<bool> EnsureSearchIndexAsync(SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var existsCommand = connection.CreateCommand();
+            existsCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recent_items_fts';";
+            var alreadyExists = Convert.ToInt32(await existsCommand.ExecuteScalarAsync(cancellationToken)) == 1;
+
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE VIRTUAL TABLE IF NOT EXISTS recent_items_fts USING fts5(
+                    display_name,
+                    target_path,
+                    content='recent_items',
+                    content_rowid='id',
+                    tokenize='trigram'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS recent_items_fts_ai AFTER INSERT ON recent_items BEGIN
+                    INSERT INTO recent_items_fts(rowid, display_name, target_path)
+                    VALUES (new.id, new.display_name, new.target_path);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS recent_items_fts_ad AFTER DELETE ON recent_items BEGIN
+                    INSERT INTO recent_items_fts(recent_items_fts, rowid, display_name, target_path)
+                    VALUES ('delete', old.id, old.display_name, old.target_path);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS recent_items_fts_au AFTER UPDATE ON recent_items BEGIN
+                    INSERT INTO recent_items_fts(recent_items_fts, rowid, display_name, target_path)
+                    VALUES ('delete', old.id, old.display_name, old.target_path);
+                    INSERT INTO recent_items_fts(rowid, display_name, target_path)
+                    VALUES (new.id, new.display_name, new.target_path);
+                END;
+                """;
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            if (!alreadyExists)
+            {
+                await using var rebuildCommand = connection.CreateCommand();
+                rebuildCommand.CommandText = "INSERT INTO recent_items_fts(recent_items_fts) VALUES('rebuild');";
+                await rebuildCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
+            return true;
+        }
+        catch (SqliteException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> IsSelectiveFtsQueryAsync(SqliteConnection connection, string ftsQuery,
+        int limit, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*)
+            FROM (
+                SELECT rowid
+                FROM recent_items_fts
+                WHERE recent_items_fts MATCH $ftsProbe
+                LIMIT $probeLimit
+            );
+            """;
+        command.Parameters.AddWithValue("$ftsProbe", ftsQuery);
+        command.Parameters.AddWithValue("$probeLimit", limit + 1);
+        var matchCount = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+        return matchCount <= limit;
+    }
+
+    private static string? BuildFtsQuery(IReadOnlyCollection<string> tokens)
+    {
+        if (tokens.Count == 0 || tokens.Any(token => token.Length < 3))
+        {
+            return null;
+        }
+
+        return string.Join(" AND ", tokens.Select(token =>
+            $"\"{token.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
     }
 
     private static string EscapeLike(string value) => value

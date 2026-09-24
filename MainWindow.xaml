@@ -115,7 +115,10 @@
                           Background="Transparent" Foreground="{StaticResource TextBrush}"
                           BorderThickness="0" RowHeaderWidth="0" RowHeight="62"
                           ColumnHeaderHeight="38" MouseDoubleClick="OnResultDoubleClick"
-                          HorizontalScrollBarVisibility="Disabled">
+                          HorizontalScrollBarVisibility="Disabled"
+                          EnableRowVirtualization="True" EnableColumnVirtualization="True"
+                          VirtualizingPanel.IsVirtualizing="True"
+                          VirtualizingPanel.VirtualizationMode="Recycling">
                     <DataGrid.Resources>
                         <Style TargetType="DataGridRow">
                             <Setter Property="Background" Value="Transparent" />

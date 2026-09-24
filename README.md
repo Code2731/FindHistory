@@ -55,6 +55,8 @@ DB 저장·검색·이동·기존 DB 전환·설정 유지는 다음 스모크 �
 dotnet run --project tests\FindHistory.SmokeTests -c Release
 ```
 
+10만~100만 건 성능 측정과 최적화 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 정리되어 있습니다.
+
 ## 수집 범위
 
 Windows가 `%AppData%\Microsoft\Windows\Recent`에 만드는 바로가기만 수집합니다. 앱 실행 이전에 Windows가 이미 삭제한 오래된 항목은 복구할 수 없지만, FindHistory 실행 이후 감지한 항목은 Windows 최근 목록에서 사라져도 DB에 유지됩니다.

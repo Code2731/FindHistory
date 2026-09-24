@@ -21,7 +21,12 @@ public partial class App : System.Windows.Application
         try
         {
             var settings = new AppSettingsService();
-            var database = new RecentDatabase(settings.DatabasePath);
+            var databaseIndex = Array.FindIndex(e.Args,
+                arg => arg.Equals("--database", StringComparison.OrdinalIgnoreCase));
+            var databasePath = databaseIndex >= 0 && databaseIndex + 1 < e.Args.Length
+                ? e.Args[databaseIndex + 1]
+                : settings.DatabasePath;
+            var database = new RecentDatabase(databasePath);
             await database.InitializeAsync();
 
             _monitor = new RecentItemsMonitor(database, new ShortcutResolver());
@@ -30,12 +35,19 @@ public partial class App : System.Windows.Application
             _window.Closing += OnWindowClosing;
 
             CreateTrayIcon();
-            await viewModel.InitializeAsync();
-
             var settingsScreenshotIndex = Array.FindIndex(e.Args,
                 arg => arg.Equals("--screenshot-settings", StringComparison.OrdinalIgnoreCase));
             var screenshotIndex = Array.FindIndex(e.Args,
                 arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase));
+            var isBackground = e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase);
+            var isScreenshotRun = settingsScreenshotIndex >= 0 || screenshotIndex >= 0;
+            if (!isBackground && !isScreenshotRun)
+            {
+                ShowWindow();
+            }
+
+            await viewModel.InitializeAsync();
+
             if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
             {
                 var settingsWindow = new StorageSettingsWindow(viewModel);
@@ -53,10 +65,6 @@ public partial class App : System.Windows.Application
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 SaveScreenshot(_window, e.Args[screenshotIndex + 1]);
                 ExitApplication();
-            }
-            else if (!e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase))
-            {
-                ShowWindow();
             }
         }
         catch (Exception ex)

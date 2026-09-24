@@ -20,6 +20,34 @@ try
 
     var originalStats = await database.GetStatsAsync();
     Assert(originalStats.UniqueItems == 1, "첫 항목이 저장되지 않았습니다.");
+    Assert((await database.SearchAsync("mple", null)).Count == 1,
+        "FTS 부분 문자열 검색이 동작하지 않습니다.");
+    Assert((await database.SearchAsync("sa", null)).Count == 1,
+        "3자 미만 LIKE 검색이 동작하지 않습니다.");
+    Assert((await database.SearchAsync("sample TXT", null)).Count == 1,
+        "여러 검색어 AND 검색이 동작하지 않습니다.");
+
+    var batch = Enumerable.Range(0, 25)
+        .Select(index => new RecentItemCandidate(
+            Path.Combine(testRoot, "batch", $"batch_{index:D3}.dat"),
+            $"batch_{index:D3}.dat",
+            "DAT",
+            "파일",
+            Path.Combine(testRoot, "batch-links", $"batch_{index:D3}.lnk"),
+            DateTimeOffset.UtcNow.AddMilliseconds(index),
+            false))
+        .ToArray();
+    await database.UpsertManyAsync(batch);
+    Assert((await database.SearchAsync("batch_012", null)).Count == 1,
+        "배치 저장 항목을 FTS에서 찾지 못했습니다.");
+
+    var stableTarget = Path.Combine(testRoot, "stable-target.bin");
+    await database.UpsertAsync(new RecentItemCandidate(stableTarget, "initial_label.bin", "BIN", "파일",
+        Path.Combine(testRoot, "stable.lnk"), DateTimeOffset.UtcNow, false));
+    await database.UpsertAsync(new RecentItemCandidate(stableTarget, "updated_label.bin", "BIN", "파일",
+        Path.Combine(testRoot, "stable.lnk"), DateTimeOffset.UtcNow.AddSeconds(1), false));
+    Assert((await database.SearchAsync("updated_label", null)).Count == 1,
+        "수정된 항목이 FTS 인덱스에 반영되지 않았습니다.");
 
     var movedPath = Path.Combine(testRoot, "moved", "findhistory.db");
     await database.MoveToAsync(movedPath);
