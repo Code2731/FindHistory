@@ -6,6 +6,12 @@ namespace FindHistory.Services;
 
 public sealed class ShortcutResolver
 {
+    private static readonly Guid ShellLinkClassId = new("00021401-0000-0000-C000-000000000046");
+    private static Type? _shellLinkType;
+
+    private static Type ShellLinkType => _shellLinkType ??=
+        Type.GetTypeFromCLSID(ShellLinkClassId, throwOnError: true)!;
+
     public RecentItemCandidate? Resolve(string shortcutPath)
     {
         try
@@ -59,6 +65,10 @@ public sealed class ShortcutResolver
         {
             return null;
         }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static string? ResolveInternetShortcut(string path)
@@ -75,8 +85,7 @@ public sealed class ShortcutResolver
 
     private static string? ResolveShellLink(string path)
     {
-        var shellLinkType = Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"), throwOnError: true)!;
-        var shellLink = (IShellLinkW)Activator.CreateInstance(shellLinkType)!;
+        var shellLink = (IShellLinkW)Activator.CreateInstance(ShellLinkType)!;
         try
         {
             ((IPersistFile)shellLink).Load(path, 0);

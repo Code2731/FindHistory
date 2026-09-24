@@ -31,6 +31,8 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 
 `publish/FindHistory.exe`를 실행하면 됩니다. 종료하려면 시스템 트레이의 FindHistory 아이콘을 우클릭하고 **종료**를 선택하세요.
 
+문서용 스크린샷은 `FINDHISTORY_ENABLE_SCREENSHOTS=1` 환경변수와 함께 `--screenshot <경로>` 또는 `--screenshot-settings <경로>`를 사용해 생성합니다.
+
 ## 데이터 위치
 
 ```text

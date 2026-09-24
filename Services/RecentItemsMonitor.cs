@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using FindHistory.Models;
 
@@ -9,6 +10,8 @@ public sealed class RecentItemsMonitor : IDisposable
     private readonly ShortcutResolver _resolver;
     private readonly string _recentFolder;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _pendingCaptures =
+        new(StringComparer.OrdinalIgnoreCase);
     private FileSystemWatcher? _watcher;
     private bool _disposed;
 
@@ -25,6 +28,11 @@ public sealed class RecentItemsMonitor : IDisposable
     public async Task StartAsync()
     {
         await ScanAsync();
+
+        if (!Directory.Exists(_recentFolder))
+        {
+            return;
+        }
 
         _watcher = new FileSystemWatcher(_recentFolder)
         {
@@ -58,6 +66,11 @@ public sealed class RecentItemsMonitor : IDisposable
     private List<RecentItemCandidate> ResolveExistingItems()
     {
         var items = new List<RecentItemCandidate>();
+        if (!Directory.Exists(_recentFolder))
+        {
+            return items;
+        }
+
         foreach (var path in Directory.EnumerateFiles(_recentFolder, "*.*", SearchOption.TopDirectoryOnly)
                      .Where(IsSupportedShortcut))
         {
@@ -77,17 +90,37 @@ public sealed class RecentItemsMonitor : IDisposable
             return;
         }
 
+        var path = e.FullPath;
+        var cancellation = new CancellationTokenSource();
+        if (_pendingCaptures.TryGetValue(path, out var previous))
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+        _pendingCaptures[path] = cancellation;
+
         try
         {
-            await Task.Delay(250);
-            if (await CaptureAsync(e.FullPath))
+            await Task.Delay(250, cancellation.Token);
+            if (await CaptureAsync(path))
             {
                 HistoryChanged?.Invoke(this, EventArgs.Empty);
             }
         }
+        catch (OperationCanceledException)
+        {
+            // 같은 파일에 더 최신 이벤트가 들어와 대체됨.
+        }
         catch (Exception ex)
         {
             MonitorError?.Invoke(this, ex.Message);
+        }
+        finally
+        {
+            if (_pendingCaptures.TryRemove(new KeyValuePair<string, CancellationTokenSource>(path, cancellation)))
+            {
+                cancellation.Dispose();
+            }
         }
     }
 
@@ -118,6 +151,12 @@ public sealed class RecentItemsMonitor : IDisposable
         }
         _disposed = true;
         _watcher?.Dispose();
+        foreach (var pending in _pendingCaptures.Values)
+        {
+            pending.Cancel();
+            pending.Dispose();
+        }
+        _pendingCaptures.Clear();
         _scanGate.Dispose();
     }
 }

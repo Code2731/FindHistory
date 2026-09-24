@@ -27,6 +27,20 @@ try
     Assert((await database.SearchAsync("sample TXT", null)).Count == 1,
         "여러 검색어 AND 검색이 동작하지 않습니다.");
 
+    await database.UpsertAsync(new RecentItemCandidate(
+        Path.Combine(testRoot, "wildcard_aXb.txt"),
+        "wildcard_aXb.txt",
+        "TXT",
+        "파일",
+        Path.Combine(testRoot, "wildcard.lnk"),
+        DateTimeOffset.UtcNow,
+        false));
+    Assert((await database.SearchAsync("_b", null)).Count == 0,
+        "LIKE 와일드카드 문자가 이스케이프되지 않았습니다.");
+
+    Assert((await database.SearchAsync(string.Empty, DateTimeOffset.UtcNow.AddDays(1))).Count == 0,
+        "미래 기간 필터가 결과를 반환했습니다.");
+
     var batch = Enumerable.Range(0, 25)
         .Select(index => new RecentItemCandidate(
             Path.Combine(testRoot, "batch", $"batch_{index:D3}.dat"),

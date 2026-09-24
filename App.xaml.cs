@@ -9,14 +9,26 @@ namespace FindHistory;
 
 public partial class App : System.Windows.Application
 {
+    private RecentDatabase? _database;
     private RecentItemsMonitor? _monitor;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
+    private Mutex? _singleInstanceMutex;
     private bool _isExiting;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        _singleInstanceMutex = new Mutex(initiallyOwned: true, "FindHistory.SingleInstance",
+            out var isFirstInstance);
+        if (!isFirstInstance)
+        {
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+            ExitApplication();
+            return;
+        }
 
         try
         {
@@ -26,19 +38,25 @@ public partial class App : System.Windows.Application
             var databasePath = databaseIndex >= 0 && databaseIndex + 1 < e.Args.Length
                 ? e.Args[databaseIndex + 1]
                 : settings.DatabasePath;
-            var database = new RecentDatabase(databasePath);
-            await database.InitializeAsync();
+            _database = new RecentDatabase(databasePath);
+            await _database.InitializeAsync();
 
-            _monitor = new RecentItemsMonitor(database, new ShortcutResolver());
-            var viewModel = new MainViewModel(database, _monitor, new AutoStartService(), settings);
+            _monitor = new RecentItemsMonitor(_database, new ShortcutResolver());
+            var viewModel = new MainViewModel(_database, _monitor, new AutoStartService(), settings);
             _window = new MainWindow(viewModel);
             _window.Closing += OnWindowClosing;
 
             CreateTrayIcon();
-            var settingsScreenshotIndex = Array.FindIndex(e.Args,
-                arg => arg.Equals("--screenshot-settings", StringComparison.OrdinalIgnoreCase));
-            var screenshotIndex = Array.FindIndex(e.Args,
-                arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase));
+            var screenshotsEnabled =
+                Environment.GetEnvironmentVariable("FINDHISTORY_ENABLE_SCREENSHOTS") == "1";
+            var settingsScreenshotIndex = screenshotsEnabled
+                ? Array.FindIndex(e.Args,
+                    arg => arg.Equals("--screenshot-settings", StringComparison.OrdinalIgnoreCase))
+                : -1;
+            var screenshotIndex = screenshotsEnabled
+                ? Array.FindIndex(e.Args,
+                    arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase))
+                : -1;
             var isBackground = e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase);
             var isScreenshotRun = settingsScreenshotIndex >= 0 || screenshotIndex >= 0;
             if (!isBackground && !isScreenshotRun)
@@ -142,6 +160,10 @@ public partial class App : System.Windows.Application
             _trayIcon.Dispose();
         }
         _window?.Close();
+        _database?.Dispose();
+        _database = null;
+        _singleInstanceMutex?.Dispose();
+        _singleInstanceMutex = null;
         Shutdown();
     }
 }

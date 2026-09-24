@@ -1,9 +1,10 @@
+using System.Globalization;
 using FindHistory.Models;
 using Microsoft.Data.Sqlite;
 
 namespace FindHistory.Services;
 
-public sealed class RecentDatabase
+public sealed class RecentDatabase : IDisposable
 {
     private string _connectionString;
     private string _databasePath;
@@ -41,6 +42,8 @@ public sealed class RecentDatabase
     }
 
     public string DatabasePath => _databasePath;
+
+    public void Dispose() => _databaseGate.Dispose();
 
     private static string BuildConnectionString(string databasePath) =>
         new SqliteConnectionStringBuilder
@@ -198,8 +201,10 @@ public sealed class RecentDatabase
                     reader.GetString(3),
                     reader.GetString(4),
                     reader.GetString(5),
-                    DateTimeOffset.Parse(reader.GetString(6)),
-                    DateTimeOffset.Parse(reader.GetString(7)),
+                    DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind),
+                    DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind),
                     reader.GetInt32(8),
                     reader.GetInt32(9) == 1));
             }

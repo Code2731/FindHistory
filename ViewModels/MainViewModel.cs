@@ -15,6 +15,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly AutoStartService _autoStart;
     private readonly AppSettingsService _settings;
     private CancellationTokenSource? _searchCancellation;
+    private long _loadSequence;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
     private RecentItem? _selectedItem;
@@ -46,7 +47,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _autoStart = autoStart;
         _settings = settings;
         _selectedDateRange = DateRanges[0];
-        _autoStartEnabled = autoStart.IsEnabled;
+        _autoStartEnabled = TryGetAutoStart(autoStart);
 
         RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
         OpenCommand = new RelayCommand(OpenSelected, () => SelectedItem is not null);
@@ -126,7 +127,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     ? $"{bytes / 1024d / 1024d:N1} MB"
                     : $"{Math.Max(1, bytes / 1024d):N0} KB";
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 return "크기 확인 불가";
             }
@@ -198,11 +199,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         IsBusy = true;
         StatusText = "데이터베이스를 새 위치로 이동하는 중…";
+        var previousPath = _database.DatabasePath;
         try
         {
             var destinationPath = Path.Combine(destinationDirectory, "findhistory.db");
+            _settings.SetDatabasePath(destinationPath);
             await _database.MoveToAsync(destinationPath);
-            _settings.SetDatabasePath(_database.DatabasePath);
             NotifyDatabaseLocationChanged();
             await LoadAsync(CancellationToken.None);
             StatusText = "데이터베이스와 기존 기록을 새 위치로 이동했습니다.";
@@ -210,12 +212,45 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            StatusText = $"데이터베이스 이동 실패: {ex.Message}";
+            if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
+            {
+                await _database.MoveToAsync(previousPath);
+            }
+
+            var restored = TryRestoreSettingsPath(previousPath);
+            StatusText = restored
+                ? $"데이터베이스 이동 실패: {ex.Message}"
+                : $"데이터베이스 이동 실패: {ex.Message} (설정 복원도 실패했습니다)";
             return false;
         }
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    private static bool TryGetAutoStart(AutoStartService autoStart)
+    {
+        try
+        {
+            return autoStart.IsEnabled;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private bool TryRestoreSettingsPath(string path)
+    {
+        try
+        {
+            _settings.SetDatabasePath(path);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -308,11 +343,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private async Task LoadAsync(CancellationToken cancellationToken)
     {
+        var sequence = ++_loadSequence;
+        var selectedId = SelectedItem?.Id;
         var since = SelectedDateRange.Duration is { } duration
             ? DateTimeOffset.Now.Subtract(duration)
             : (DateTimeOffset?)null;
         var items = await _database.SearchAsync(SearchText, since, cancellationToken: cancellationToken);
         var stats = await _database.GetStatsAsync(cancellationToken);
+
+        if (sequence != _loadSequence)
+        {
+            return;
+        }
 
         Items.Clear();
         foreach (var item in items)
@@ -320,10 +362,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Items.Add(item);
         }
 
+        if (selectedId is { } id)
+        {
+            SelectedItem = Items.FirstOrDefault(item => item.Id == id);
+        }
+
         SummaryText = $"{items.Count:N0}개 결과  ·  {stats.UniqueItems:N0}개 항목  ·  누적 {stats.TotalOpenCount:N0}회";
     }
 
-    private void OnHistoryChanged(object? sender, EventArgs e) => ScheduleReload();
+    private void OnHistoryChanged(object? sender, EventArgs e) =>
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(ScheduleReload);
 
     private void OnMonitorError(object? sender, string message)
     {

@@ -46,7 +46,8 @@ public partial class MainWindow : Window
     {
         var handle = new WindowInteropHelper(this).Handle;
         var enabled = 1;
-        DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
+        var darkModeAttribute = Environment.OSVersion.Version.Build >= 18985 ? 20 : 19;
+        DwmSetWindowAttribute(handle, darkModeAttribute, ref enabled, sizeof(int));
     }
 
     [DllImport("dwmapi.dll")]
