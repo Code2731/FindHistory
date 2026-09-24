@@ -6,5 +6,7 @@ public static class AppPaths
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "FindHistory");
 
-    public static string DatabasePath { get; } = Path.Combine(DataDirectory, "findhistory.db");
+    public static string DefaultDatabasePath { get; } = Path.Combine(DataDirectory, "findhistory.db");
+
+    public static string SettingsPath { get; } = Path.Combine(DataDirectory, "settings.json");
 }

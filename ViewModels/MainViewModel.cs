@@ -13,6 +13,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly RecentDatabase _database;
     private readonly RecentItemsMonitor _monitor;
     private readonly AutoStartService _autoStart;
+    private readonly AppSettingsService _settings;
     private CancellationTokenSource? _searchCancellation;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
@@ -34,11 +35,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         new("최근 1년", TimeSpan.FromDays(365))
     ];
 
-    public MainViewModel(RecentDatabase database, RecentItemsMonitor monitor, AutoStartService autoStart)
+    public MainViewModel(
+        RecentDatabase database,
+        RecentItemsMonitor monitor,
+        AutoStartService autoStart,
+        AppSettingsService settings)
     {
         _database = database;
         _monitor = monitor;
         _autoStart = autoStart;
+        _settings = settings;
         _selectedDateRange = DateRanges[0];
         _autoStartEnabled = autoStart.IsEnabled;
 
@@ -105,7 +111,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
         private set => SetField(ref _summaryText, value);
     }
 
-    public string DatabasePath => AppPaths.DatabasePath;
+    public string DatabasePath => _database.DatabasePath;
+
+    public string DatabaseDirectory => Path.GetDirectoryName(DatabasePath) ?? DatabasePath;
+
+    public string DatabaseSizeText
+    {
+        get
+        {
+            try
+            {
+                var bytes = new FileInfo(DatabasePath).Length;
+                return bytes >= 1024 * 1024
+                    ? $"{bytes / 1024d / 1024d:N1} MB"
+                    : $"{Math.Max(1, bytes / 1024d):N0} KB";
+            }
+            catch (IOException)
+            {
+                return "크기 확인 불가";
+            }
+        }
+    }
 
     public bool AutoStartEnabled
     {
@@ -166,6 +192,77 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             IsBusy = false;
         }
+    }
+
+    public async Task<bool> MoveDatabaseAsync(string destinationDirectory)
+    {
+        IsBusy = true;
+        StatusText = "데이터베이스를 새 위치로 이동하는 중…";
+        try
+        {
+            var destinationPath = Path.Combine(destinationDirectory, "findhistory.db");
+            await _database.MoveToAsync(destinationPath);
+            _settings.SetDatabasePath(_database.DatabasePath);
+            NotifyDatabaseLocationChanged();
+            await LoadAsync(CancellationToken.None);
+            StatusText = "데이터베이스와 기존 기록을 새 위치로 이동했습니다.";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"데이터베이스 이동 실패: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public async Task<bool> UseDatabaseAsync(string databasePath)
+    {
+        IsBusy = true;
+        StatusText = "선택한 데이터베이스를 확인하는 중…";
+        try
+        {
+            await _database.UseAsync(databasePath);
+            _settings.SetDatabasePath(_database.DatabasePath);
+            NotifyDatabaseLocationChanged();
+            await LoadAsync(CancellationToken.None);
+            StatusText = "선택한 데이터베이스를 사용합니다.";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"데이터베이스를 열 수 없습니다: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public void OpenDatabaseFolder()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{DatabasePath}\"")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"데이터 폴더를 열 수 없습니다: {ex.Message}";
+        }
+    }
+
+    private void NotifyDatabaseLocationChanged()
+    {
+        OnPropertyChanged(nameof(DatabasePath));
+        OnPropertyChanged(nameof(DatabaseDirectory));
+        OnPropertyChanged(nameof(DatabaseSizeText));
     }
 
     private async Task RefreshAsync()

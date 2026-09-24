@@ -9,7 +9,10 @@ Windows의 **최근 항목**을 로컬 SQLite 데이터베이스에 계속 누�
 - 동일 파일의 재등장을 열림 횟수로 누적
 - 파일명과 전체 경로를 여러 검색어로 필터링
 - 오늘 / 7일 / 30일 / 1년 기간 필터
+- `Ctrl+K`로 검색창에 즉시 포커스
 - 파일 열기와 탐색기에서 위치 열기
+- 현재 기록을 유지한 데이터베이스 위치 이동
+- 다른 위치의 기존 FindHistory 데이터베이스 선택
 - 창을 닫아도 시스템 트레이에서 기록 지속
 - 선택적인 Windows 로그인 시 백그라운드 실행
 - 모든 데이터는 로컬 SQLite DB에만 저장
@@ -35,6 +38,22 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 ```
 
 DB는 앱과 별도로 유지되므로 앱을 업데이트해도 기록은 남습니다.
+
+메인 화면의 **데이터 저장소**에서 다른 폴더로 DB를 옮기거나 기존 `findhistory.db`를 선택할 수 있습니다. 선택한 위치는 아래 설정에 저장됩니다.
+
+```text
+%LocalAppData%\FindHistory\settings.json
+```
+
+SQLite DB는 로컬 또는 외장 드라이브에 두는 것을 권장합니다. OneDrive 같은 실시간 동기화 폴더는 여러 장치가 동시에 접근할 때 충돌할 수 있습니다.
+
+## 검증
+
+DB 저장·검색·이동·기존 DB 전환·설정 유지는 다음 스모크 테스트로 확인할 수 있습니다.
+
+```powershell
+dotnet run --project tests\FindHistory.SmokeTests -c Release
+```
 
 ## 수집 범위
 

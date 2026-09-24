@@ -1,5 +1,7 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Runtime.InteropServices;
 using FindHistory.ViewModels;
 
 namespace FindHistory;
@@ -13,6 +15,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         _viewModel = viewModel;
         DataContext = viewModel;
+        SourceInitialized += OnSourceInitialized;
     }
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
@@ -22,4 +25,31 @@ public partial class MainWindow : Window
             _viewModel.OpenCommand.Execute(null);
         }
     }
+
+    private void OnDatabaseSettingsClick(object sender, RoutedEventArgs e)
+    {
+        var window = new StorageSettingsWindow(_viewModel) { Owner = this };
+        window.ShowDialog();
+    }
+
+    private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.K && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+            e.Handled = true;
+        }
+    }
+
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        var enabled = 1;
+        DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int));
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr windowHandle, int attribute,
+        ref int attributeValue, int attributeSize);
 }

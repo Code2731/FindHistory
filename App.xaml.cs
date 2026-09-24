@@ -1,4 +1,6 @@
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using Forms = System.Windows.Forms;
 using FindHistory.Services;
 using FindHistory.ViewModels;
@@ -18,18 +20,41 @@ public partial class App : System.Windows.Application
 
         try
         {
-            var database = new RecentDatabase(AppPaths.DatabasePath);
+            var settings = new AppSettingsService();
+            var database = new RecentDatabase(settings.DatabasePath);
             await database.InitializeAsync();
 
             _monitor = new RecentItemsMonitor(database, new ShortcutResolver());
-            var viewModel = new MainViewModel(database, _monitor, new AutoStartService());
+            var viewModel = new MainViewModel(database, _monitor, new AutoStartService(), settings);
             _window = new MainWindow(viewModel);
             _window.Closing += OnWindowClosing;
 
             CreateTrayIcon();
             await viewModel.InitializeAsync();
 
-            if (!e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase))
+            var settingsScreenshotIndex = Array.FindIndex(e.Args,
+                arg => arg.Equals("--screenshot-settings", StringComparison.OrdinalIgnoreCase));
+            var screenshotIndex = Array.FindIndex(e.Args,
+                arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase));
+            if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
+            {
+                var settingsWindow = new StorageSettingsWindow(viewModel);
+                settingsWindow.Show();
+                settingsWindow.UpdateLayout();
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                SaveScreenshot(settingsWindow, e.Args[settingsScreenshotIndex + 1]);
+                settingsWindow.Close();
+                ExitApplication();
+            }
+            else if (screenshotIndex >= 0 && screenshotIndex + 1 < e.Args.Length)
+            {
+                _window.Show();
+                _window.UpdateLayout();
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                SaveScreenshot(_window, e.Args[screenshotIndex + 1]);
+                ExitApplication();
+            }
+            else if (!e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase))
             {
                 ShowWindow();
             }
@@ -40,6 +65,20 @@ public partial class App : System.Windows.Application
                 MessageBoxButton.OK, MessageBoxImage.Error);
             ExitApplication();
         }
+    }
+
+    private static void SaveScreenshot(Window window, string outputPath)
+    {
+        var width = Math.Max(1, (int)Math.Ceiling(window.ActualWidth));
+        var height = Math.Max(1, (int)Math.Ceiling(window.ActualHeight));
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(outputPath);
+        encoder.Save(stream);
     }
 
     private void CreateTrayIcon()
