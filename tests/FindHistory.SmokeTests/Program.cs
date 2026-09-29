@@ -6,6 +6,22 @@ Directory.CreateDirectory(testRoot);
 
 try
 {
+    var logDirectory = Path.Combine(testRoot, "logs");
+    Directory.CreateDirectory(logDirectory);
+    var expiredLog = Path.Combine(logDirectory, "findhistory-2000-01-01.log");
+    await File.WriteAllTextAsync(expiredLog, "expired");
+    File.SetLastWriteTimeUtc(expiredLog, DateTime.UtcNow.AddDays(-30));
+    var logger = new AppLogService(logDirectory, retentionDays: 7, maximumFileBytes: 256);
+    for (var index = 0; index < 8; index++)
+    {
+        logger.Information($"rotation-test-{index}: {new string('x', 120)}");
+    }
+    var currentLogs = Directory.GetFiles(logDirectory, "findhistory-*.log");
+    Assert(!File.Exists(expiredLog), "보관 기간이 지난 로그 파일을 정리하지 못했습니다.");
+    Assert(currentLogs.Length >= 2, "로그 파일 크기 제한에 따른 회전이 동작하지 않습니다.");
+    Assert(currentLogs.Any(path => File.ReadAllText(path).Contains("rotation-test-7")),
+        "회전된 로그에 최신 메시지가 기록되지 않았습니다.");
+
     var originalPath = Path.Combine(testRoot, "original", "findhistory.db");
     using var database = new RecentDatabase(originalPath);
     await database.InitializeAsync();
@@ -124,6 +140,50 @@ try
     Assert((await database.SearchWithStatsAsync("daily-notes", emptyDayRange)).Items.Count == 0,
         "열지 않은 날짜에 파일이 반환되었습니다.");
 
+    var boundaryTarget = Path.Combine(testRoot, "timeline", "boundary.txt");
+    var boundaryStart = new DateTimeOffset(2026, 9, 25, 0, 0, 0, TimeSpan.Zero);
+    var boundaryEnd = boundaryStart.AddDays(1);
+    foreach (var openedAt in new[]
+             {
+                 boundaryStart,
+                 boundaryStart,
+                 boundaryEnd.AddTicks(-1),
+                 boundaryEnd
+             })
+    {
+        await database.UpsertAsync(new RecentItemCandidate(
+            boundaryTarget,
+            "boundary.txt",
+            "TXT",
+            "파일",
+            Path.Combine(testRoot, "boundary.lnk"),
+            openedAt,
+            false));
+    }
+
+    var boundaryRange = new HistoryDateRange(boundaryStart, boundaryEnd, "경계 테스트");
+    var boundarySnapshot = await database.SearchWithStatsAsync("boundary", boundaryRange);
+    Assert(boundarySnapshot.Items.Count == 1 && boundarySnapshot.Items[0].OpenCount == 2,
+        "날짜 범위가 시작 시각 포함·종료 시각 제외 또는 중복 이벤트 제거 규칙을 지키지 않았습니다.");
+    Assert(boundarySnapshot.Items[0].LastSeen == boundaryEnd.AddTicks(-1),
+        "날짜 범위 종료 직전 이벤트를 찾지 못했거나 종료 경계 이벤트를 포함했습니다.");
+
+    var pacific = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
+    var springDstRange = HistoryDateRangeFactory.CreateLocalCalendarRange(
+        new DateTime(2026, 3, 8), new DateTime(2026, 3, 9), "DST 시작", pacific);
+    var fallDstRange = HistoryDateRangeFactory.CreateLocalCalendarRange(
+        new DateTime(2026, 11, 1), new DateTime(2026, 11, 2), "DST 종료", pacific);
+    Assert(springDstRange.EndUtc - springDstRange.StartUtc == TimeSpan.FromHours(23),
+        "DST 시작일의 로컬 날짜 범위를 23시간으로 변환하지 못했습니다.");
+    Assert(fallDstRange.EndUtc - fallDstRange.StartUtc == TimeSpan.FromHours(25),
+        "DST 종료일의 로컬 날짜 범위를 25시간으로 변환하지 못했습니다.");
+
+    var databaseDiagnostics = await database.GetDiagnosticsAsync();
+    Assert(databaseDiagnostics.UniqueItems > 0 && databaseDiagnostics.StoredEvents > 0,
+        "데이터베이스 진단 통계를 읽지 못했습니다.");
+    Assert(databaseDiagnostics.EstimatedEvents == 0,
+        "새 데이터베이스 이벤트가 추정 기록으로 집계되었습니다.");
+
     var movedPath = Path.Combine(testRoot, "moved", "findhistory.db");
     await database.MoveToAsync(movedPath);
     Assert(File.Exists(movedPath), "DB 파일이 새 위치로 이동되지 않았습니다.");
@@ -201,6 +261,9 @@ try
             "기존 DB의 마지막 기록을 날짜 이벤트로 이관하지 못했거나 중복 이관했습니다.");
         Assert(legacySnapshot.Items[0].IsEstimatedHistory,
             "기존 DB에서 복원한 날짜가 추정 기록으로 표시되지 않았습니다.");
+        var legacyDiagnostics = await legacyDatabase.GetDiagnosticsAsync();
+        Assert(legacyDiagnostics.EstimatedEvents == 1,
+            "기존 DB에서 이관한 추정 이벤트가 진단 통계에 반영되지 않았습니다.");
     }
 
     var recentFolder = Path.Combine(testRoot, "recent-folder");
@@ -214,12 +277,27 @@ try
         await monitor.StartAsync();
         Assert((await monitorDatabase.SearchAsync("initial-shortcut", null)).Count == 1,
             "감시 시작 시 기존 바로가기를 수집하지 못했습니다.");
+        var startupDiagnostics = monitor.GetDiagnosticsSnapshot();
+        Assert(startupDiagnostics.IsStarted && startupDiagnostics.IsWatcherActive,
+            "감시기 진단 상태가 실행 중으로 표시되지 않습니다.");
+        Assert(startupDiagnostics.LastScanCompletedUtc is not null &&
+               startupDiagnostics.LastScanItemCount == 1 &&
+               startupDiagnostics.LastScanDuration is not null,
+            "초기 전체 스캔 진단 정보가 기록되지 않았습니다.");
 
         await File.WriteAllTextAsync(Path.Combine(recentFolder, "live-shortcut.url"),
             "[InternetShortcut]\nURL=https://example.com/live\n");
         await WaitUntilAsync(
             async () => (await monitorDatabase.SearchAsync("live-shortcut", null)).Count == 1,
             TimeSpan.FromSeconds(5));
+        var liveDiagnostics = monitor.GetDiagnosticsSnapshot();
+        Assert(liveDiagnostics.SessionCaptureCount >= 1 && liveDiagnostics.LastCaptureUtc is not null,
+            "실시간 기록이 감시기 진단 통계에 반영되지 않았습니다.");
+
+        await monitor.StopAsync();
+        var stoppedDiagnostics = monitor.GetDiagnosticsSnapshot();
+        Assert(stoppedDiagnostics.IsStopping && !stoppedDiagnostics.IsWatcherActive,
+            "감시기 종료 상태가 진단 정보에 반영되지 않았습니다.");
     }
 
     var settingsPath = Path.Combine(testRoot, "settings.json");
@@ -229,7 +307,7 @@ try
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
 
-    Console.WriteLine("PASS: 저장, 검색, 날짜별 이벤트, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
+    Console.WriteLine("PASS: 로그, 저장, 검색, 날짜 경계/DST, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }
 finally
 {

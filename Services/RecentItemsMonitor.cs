@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using FindHistory.Models;
 
@@ -8,6 +9,7 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
 {
     private readonly RecentDatabase _database;
     private readonly ShortcutResolver _resolver;
+    private readonly AppLogService? _log;
     private readonly string _recentFolder;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -16,24 +18,38 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
     private readonly ConcurrentDictionary<long, Task> _inFlightTasks = new();
     private readonly object _watcherLock = new();
     private readonly object _stopLock = new();
+    private readonly object _diagnosticsLock = new();
     private FileSystemWatcher? _watcher;
     private Task? _stopTask;
     private long _nextTaskId;
     private int _started;
     private int _recoveryScheduled;
     private int _stopping;
+    private int _watcherActive;
     private bool _resourcesDisposed;
+    private DateTimeOffset? _startedUtc;
+    private DateTimeOffset? _lastScanCompletedUtc;
+    private TimeSpan? _lastScanDuration;
+    private int _lastScanItemCount;
+    private DateTimeOffset? _lastCaptureUtc;
+    private long _sessionCaptureCount;
+    private int _watcherRecoveryCount;
+    private DateTimeOffset? _lastErrorUtc;
+    private string? _lastErrorMessage;
 
     public event EventHandler? HistoryChanged;
     public event EventHandler<string>? MonitorError;
+    public event EventHandler? DiagnosticsChanged;
 
     public RecentItemsMonitor(
         RecentDatabase database,
         ShortcutResolver resolver,
-        string? recentFolder = null)
+        string? recentFolder = null,
+        AppLogService? log = null)
     {
         _database = database;
         _resolver = resolver;
+        _log = log;
         _recentFolder = recentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.Recent);
     }
 
@@ -44,6 +60,13 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         {
             return;
         }
+
+        lock (_diagnosticsLock)
+        {
+            _startedUtc = DateTimeOffset.UtcNow;
+        }
+        DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
+        _log?.Information("Recent Items monitoring started.");
 
         // 감시를 먼저 켜고 전체 스캔을 수행해야 두 작업 사이에 생성된 바로가기를 놓치지 않는다.
         StartWatcherIfAvailable();
@@ -60,10 +83,20 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         var token = linkedCancellation.Token;
 
         await _scanGate.WaitAsync(token);
+        var startedTimestamp = Stopwatch.GetTimestamp();
         try
         {
             var items = await Task.Run(() => ResolveExistingItems(token), token);
             await _database.UpsertManyAsync(items, token);
+            lock (_diagnosticsLock)
+            {
+                _lastScanCompletedUtc = DateTimeOffset.UtcNow;
+                _lastScanDuration = Stopwatch.GetElapsedTime(startedTimestamp);
+                _lastScanItemCount = items.Count;
+            }
+            DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
+            _log?.Information($"Recent Items scan completed: {items.Count:N0} shortcuts in " +
+                              $"{Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds:N0} ms.");
             if (notifyChanges)
             {
                 HistoryChanged?.Invoke(this, EventArgs.Empty);
@@ -105,8 +138,10 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
             var previous = _watcher;
             _watcher = watcher;
             watcher.EnableRaisingEvents = true;
+            Volatile.Write(ref _watcherActive, 1);
             previous?.Dispose();
         }
+        DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private List<RecentItemCandidate> ResolveExistingItems(CancellationToken cancellationToken)
@@ -154,6 +189,12 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
             await Task.Delay(250, cancellation.Token);
             if (await CaptureAsync(path, cancellation.Token))
             {
+                lock (_diagnosticsLock)
+                {
+                    _lastCaptureUtc = DateTimeOffset.UtcNow;
+                    _sessionCaptureCount++;
+                }
+                DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
                 HistoryChanged?.Invoke(this, EventArgs.Empty);
             }
         }
@@ -163,6 +204,7 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
+            RecordError("Recent item capture failed.", ex);
             MonitorError?.Invoke(this, ex.Message);
         }
         finally
@@ -200,6 +242,11 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
     {
         try
         {
+            lock (_diagnosticsLock)
+            {
+                _watcherRecoveryCount++;
+            }
+            RecordError("File watcher failed; starting recovery scan.", exception);
             MonitorError?.Invoke(this, $"{exception.Message} 전체 스캔으로 감시를 복구합니다.");
             DisposeWatcher();
             _lifetimeCancellation.Token.ThrowIfCancellationRequested();
@@ -212,6 +259,7 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         }
         catch (Exception ex)
         {
+            RecordError("File watcher recovery failed.", ex);
             MonitorError?.Invoke(this, $"감시 복구 실패: {ex.Message}");
         }
         finally
@@ -281,6 +329,8 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         // 수동 새로고침이나 시작 스캔이 진행 중이었다면 DB를 닫기 전에 끝날 때까지 기다린다.
         await _scanGate.WaitAsync();
         _scanGate.Release();
+        _log?.Information("Recent Items monitoring stopped.");
+        DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void DisposeWatcher()
@@ -295,7 +345,41 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
             _watcher.EnableRaisingEvents = false;
             _watcher.Dispose();
             _watcher = null;
+            Volatile.Write(ref _watcherActive, 0);
         }
+    }
+
+    public MonitorDiagnostics GetDiagnosticsSnapshot()
+    {
+        lock (_diagnosticsLock)
+        {
+            return new MonitorDiagnostics(
+                Volatile.Read(ref _started) != 0,
+                Volatile.Read(ref _stopping) != 0,
+                Volatile.Read(ref _watcherActive) != 0,
+                _recentFolder,
+                _startedUtc,
+                _lastScanCompletedUtc,
+                _lastScanDuration,
+                _lastScanItemCount,
+                _lastCaptureUtc,
+                _sessionCaptureCount,
+                _watcherRecoveryCount,
+                _lastErrorUtc,
+                _lastErrorMessage,
+                _inFlightTasks.Count);
+        }
+    }
+
+    private void RecordError(string message, Exception exception)
+    {
+        lock (_diagnosticsLock)
+        {
+            _lastErrorUtc = DateTimeOffset.UtcNow;
+            _lastErrorMessage = $"{message} {exception.Message}";
+        }
+        _log?.Error(message, exception);
+        DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void ThrowIfStopped()

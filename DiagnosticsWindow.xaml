@@ -1,0 +1,54 @@
+<Window x:Class="FindHistory.DiagnosticsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="진단 정보" Width="760" Height="700"
+        MinWidth="640" MinHeight="520"
+        Icon="Assets/findhistory.ico"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource PageBrush}"
+        Loaded="OnLoaded">
+    <Grid Margin="26,22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="16" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="16" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+            <TextBlock Text="진단 정보" FontSize="23" FontWeight="SemiBold" />
+            <TextBlock Text="최근 항목 감시 상태, 데이터베이스 통계와 마지막 오류를 확인합니다."
+                       Style="{StaticResource SecondaryText}" FontSize="13" Margin="0,5,0,0" />
+        </StackPanel>
+
+        <Border Grid.Row="2" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                CornerRadius="10" Padding="4">
+            <TextBox x:Name="ReportTextBox"
+                     IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Cascadia Mono,Consolas" FontSize="12.5"
+                     Padding="14" BorderThickness="0" Background="Transparent"
+                     Foreground="{StaticResource TextBrush}" />
+        </Border>
+
+        <Grid Grid.Row="4">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="RefreshButton" Content="새로고침" Click="OnRefreshClick" />
+            <Button Grid.Column="2" Content="정보 복사" Click="OnCopyClick" />
+            <Button Grid.Column="4" Content="로그 폴더 열기" Click="OnOpenLogFolderClick" />
+            <Button Grid.Column="6" Content="닫기" Style="{StaticResource PrimaryButton}"
+                    Click="OnCloseClick" MinWidth="82" />
+        </Grid>
+    </Grid>
+</Window>

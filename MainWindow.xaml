@@ -26,6 +26,8 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="10" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
             <StackPanel VerticalAlignment="Center">
@@ -38,14 +40,27 @@
                     BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                     CornerRadius="18" Padding="12,7" VerticalAlignment="Center">
                 <StackPanel Orientation="Horizontal">
-                    <Ellipse Width="7" Height="7" Fill="{StaticResource SuccessBrush}"
-                             VerticalAlignment="Center" Margin="0,0,8,0" />
-                    <TextBlock Text="백그라운드 기록 중" Style="{StaticResource SecondaryText}"
+                    <Ellipse Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,8,0">
+                        <Ellipse.Style>
+                            <Style TargetType="Ellipse">
+                                <Setter Property="Fill" Value="#D9A441" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsMonitorHealthy}" Value="True">
+                                        <Setter Property="Fill" Value="{StaticResource SuccessBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock Text="{Binding MonitorStatusText}" Style="{StaticResource SecondaryText}"
                                FontSize="12" VerticalAlignment="Center" />
                 </StackPanel>
             </Border>
 
-            <Button Grid.Column="3" Content="데이터 저장소" Click="OnDatabaseSettingsClick"
+            <Button Grid.Column="3" Content="진단" Style="{StaticResource QuietButton}"
+                    Click="OnDiagnosticsClick" ToolTip="감시 상태와 로그 정보를 확인합니다" />
+
+            <Button Grid.Column="5" Content="데이터 저장소" Click="OnDatabaseSettingsClick"
                     ToolTip="데이터베이스 위치를 이동하거나 기존 DB를 선택합니다" />
         </Grid>
 

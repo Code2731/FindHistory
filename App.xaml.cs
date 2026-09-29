@@ -9,6 +9,7 @@ namespace FindHistory;
 
 public partial class App : System.Windows.Application
 {
+    private readonly AppLogService _log = new();
     private RecentDatabase? _database;
     private RecentItemsMonitor? _monitor;
     private MainViewModel? _viewModel;
@@ -21,11 +22,24 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        RegisterUnhandledExceptionLogging();
+        _log.Information($"FindHistory {GetType().Assembly.GetName().Version} starting.");
 
-        _singleInstanceMutex = new Mutex(initiallyOwned: true, "FindHistory.SingleInstance",
+        var screenshotsEnabled =
+            Environment.GetEnvironmentVariable("FINDHISTORY_ENABLE_SCREENSHOTS") == "1";
+        var isScreenshotRun = screenshotsEnabled &&
+                              (HasOutputArgument(e.Args, "--screenshot") ||
+                               HasOutputArgument(e.Args, "--screenshot-settings") ||
+                               HasOutputArgument(e.Args, "--screenshot-diagnostics"));
+        var mutexName = isScreenshotRun
+            ? $"FindHistory.Isolated.{Environment.ProcessId}"
+            : "FindHistory.SingleInstance";
+
+        _singleInstanceMutex = new Mutex(initiallyOwned: true, mutexName,
             out var isFirstInstance);
         if (!isFirstInstance)
         {
+            _log.Information("A second application instance was rejected.");
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
             await ExitApplicationAsync();
@@ -43,24 +57,26 @@ public partial class App : System.Windows.Application
             _database = new RecentDatabase(databasePath);
             await _database.InitializeAsync();
 
-            _monitor = new RecentItemsMonitor(_database, new ShortcutResolver());
-            _viewModel = new MainViewModel(_database, _monitor, new AutoStartService(), settings);
+            _monitor = new RecentItemsMonitor(_database, new ShortcutResolver(), log: _log);
+            _viewModel = new MainViewModel(
+                _database, _monitor, new AutoStartService(), settings, _log);
             _window = new MainWindow(_viewModel);
             _window.Closing += OnWindowClosing;
 
             CreateTrayIcon();
-            var screenshotsEnabled =
-                Environment.GetEnvironmentVariable("FINDHISTORY_ENABLE_SCREENSHOTS") == "1";
             var settingsScreenshotIndex = screenshotsEnabled
                 ? Array.FindIndex(e.Args,
                     arg => arg.Equals("--screenshot-settings", StringComparison.OrdinalIgnoreCase))
+                : -1;
+            var diagnosticsScreenshotIndex = screenshotsEnabled
+                ? Array.FindIndex(e.Args,
+                    arg => arg.Equals("--screenshot-diagnostics", StringComparison.OrdinalIgnoreCase))
                 : -1;
             var screenshotIndex = screenshotsEnabled
                 ? Array.FindIndex(e.Args,
                     arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase))
                 : -1;
             var isBackground = e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase);
-            var isScreenshotRun = settingsScreenshotIndex >= 0 || screenshotIndex >= 0;
             if (!isBackground && !isScreenshotRun)
             {
                 ShowWindow();
@@ -78,6 +94,19 @@ public partial class App : System.Windows.Application
                 settingsWindow.Close();
                 await ExitApplicationAsync();
             }
+            else if (diagnosticsScreenshotIndex >= 0 &&
+                     diagnosticsScreenshotIndex + 1 < e.Args.Length)
+            {
+                var diagnosticsWindow = new DiagnosticsWindow(_viewModel);
+                diagnosticsWindow.Show();
+                await diagnosticsWindow.RefreshReportAsync();
+                diagnosticsWindow.UpdateLayout();
+                await Dispatcher.InvokeAsync(
+                    () => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                SaveScreenshot(diagnosticsWindow, e.Args[diagnosticsScreenshotIndex + 1]);
+                diagnosticsWindow.Close();
+                await ExitApplicationAsync();
+            }
             else if (screenshotIndex >= 0 && screenshotIndex + 1 < e.Args.Length)
             {
                 _window.Show();
@@ -89,10 +118,33 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
+            _log.Error("Application startup failed.", ex);
             System.Windows.MessageBox.Show($"FindHistory를 시작하지 못했습니다.\n\n{ex.Message}", "FindHistory",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             await ExitApplicationAsync();
         }
+    }
+
+    private void RegisterUnhandledExceptionLogging()
+    {
+        DispatcherUnhandledException += (_, args) =>
+            _log.Error("Unhandled UI exception.", args.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception exception)
+            {
+                _log.Error("Unhandled application exception.", exception);
+            }
+            else
+            {
+                _log.Warning($"Unhandled non-exception object: {args.ExceptionObject}");
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            _log.Error("Unobserved background task exception.", args.Exception);
+            args.SetObserved();
+        };
     }
 
     private static void SaveScreenshot(Window window, string outputPath)
@@ -107,6 +159,19 @@ public partial class App : System.Windows.Application
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var stream = File.Create(outputPath);
         encoder.Save(stream);
+    }
+
+    private static bool HasOutputArgument(IReadOnlyList<string> arguments, string option)
+    {
+        for (var index = 0; index < arguments.Count - 1; index++)
+        {
+            if (arguments[index].Equals(option, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(arguments[index + 1]))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void CreateTrayIcon()
@@ -180,25 +245,37 @@ public partial class App : System.Windows.Application
         }
 
         _isExiting = true;
-        _viewModel?.Dispose();
-        _viewModel = null;
-        if (_monitor is not null)
+        _log.Information("FindHistory shutdown requested.");
+        try
         {
-            await _monitor.DisposeAsync();
-            _monitor = null;
+            _viewModel?.Dispose();
+            _viewModel = null;
+            if (_monitor is not null)
+            {
+                await _monitor.DisposeAsync();
+                _monitor = null;
+            }
         }
-        if (_trayIcon is not null)
+        catch (Exception ex)
         {
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
+            _log.Error("An error occurred while stopping background services.", ex);
         }
-        _trayApplicationIcon?.Dispose();
-        _trayApplicationIcon = null;
-        _window?.Close();
-        _database?.Dispose();
-        _database = null;
-        _singleInstanceMutex?.Dispose();
-        _singleInstanceMutex = null;
-        Shutdown();
+        finally
+        {
+            if (_trayIcon is not null)
+            {
+                _trayIcon.Visible = false;
+                _trayIcon.Dispose();
+            }
+            _trayApplicationIcon?.Dispose();
+            _trayApplicationIcon = null;
+            _window?.Close();
+            _database?.Dispose();
+            _database = null;
+            _singleInstanceMutex?.Dispose();
+            _singleInstanceMutex = null;
+            _log.Information("FindHistory shutdown completed.");
+            Shutdown();
+        }
     }
 }

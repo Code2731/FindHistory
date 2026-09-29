@@ -250,6 +250,42 @@ public sealed class RecentDatabase : IDisposable
         }
     }
 
+    public async Task<DatabaseDiagnostics> GetDiagnosticsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT
+                    hs.unique_items,
+                    hs.total_open_count,
+                    (SELECT COUNT(*) FROM open_events),
+                    (SELECT COUNT(*) FROM open_events WHERE is_estimated = 1)
+                FROM history_stats hs
+                WHERE hs.id = 1;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return new DatabaseDiagnostics(0, 0, 0, 0);
+            }
+
+            return new DatabaseDiagnostics(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                reader.GetInt64(2),
+                reader.GetInt64(3));
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
     public async Task<SearchSnapshot> SearchWithStatsAsync(
         string searchText,
         HistoryDateRange? dateRange,

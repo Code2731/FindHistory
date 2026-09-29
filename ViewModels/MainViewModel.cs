@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using FindHistory.Models;
 using FindHistory.Services;
@@ -13,6 +16,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private readonly RecentItemsMonitor _monitor;
     private readonly AutoStartService _autoStart;
     private readonly AppSettingsService _settings;
+    private readonly AppLogService _log;
     private CancellationTokenSource? _searchCancellation;
     private long _loadSequence;
     private string _searchText = string.Empty;
@@ -21,6 +25,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private RecentItem? _selectedItem;
     private string _statusText = "최근 항목을 불러오는 중…";
     private string _summaryText = "기록 준비 중";
+    private string _monitorStatusText = "기록 준비 중";
+    private bool _isMonitorHealthy;
     private bool _autoStartEnabled;
     private bool _isBusy;
     private bool _initialized;
@@ -48,12 +54,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         RecentDatabase database,
         RecentItemsMonitor monitor,
         AutoStartService autoStart,
-        AppSettingsService settings)
+        AppSettingsService settings,
+        AppLogService log)
     {
         _database = database;
         _monitor = monitor;
         _autoStart = autoStart;
         _settings = settings;
+        _log = log;
         _selectedDateRange = DateRanges[0];
         _autoStartEnabled = TryGetAutoStart(autoStart);
 
@@ -136,6 +144,18 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         private set => SetField(ref _summaryText, value);
     }
 
+    public string MonitorStatusText
+    {
+        get => _monitorStatusText;
+        private set => SetField(ref _monitorStatusText, value);
+    }
+
+    public bool IsMonitorHealthy
+    {
+        get => _isMonitorHealthy;
+        private set => SetField(ref _isMonitorHealthy, value);
+    }
+
     public double LastSearchLatencyMilliseconds
     {
         get => _lastSearchLatencyMilliseconds;
@@ -184,6 +204,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
             catch (Exception ex)
             {
+                _log.Error("Windows startup registration update failed.", ex);
                 StatusText = $"시작 프로그램 설정 실패: {ex.Message}";
                 OnPropertyChanged();
             }
@@ -212,10 +233,12 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         _monitor.HistoryChanged += OnHistoryChanged;
         _monitor.MonitorError += OnMonitorError;
+        _monitor.DiagnosticsChanged += OnDiagnosticsChanged;
         IsBusy = true;
         try
         {
             await _monitor.StartAsync();
+            UpdateMonitorStatus();
             await LoadAsync(CancellationToken.None);
             StatusText = "최근 항목 폴더를 실시간으로 감시하고 있습니다.";
         }
@@ -242,6 +265,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Database move failed.", ex);
             if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
             {
                 await _database.MoveToAsync(previousPath);
@@ -302,6 +326,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Database switch failed.", ex);
             var restored = true;
             if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
             {
@@ -341,8 +366,71 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Opening the database folder failed.", ex);
             StatusText = $"데이터 폴더를 열 수 없습니다: {ex.Message}";
         }
+    }
+
+    public void OpenLogFolder()
+    {
+        try
+        {
+            Directory.CreateDirectory(_log.LogDirectory);
+            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_log.LogDirectory}\"")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Opening the log folder failed.", ex);
+            StatusText = $"로그 폴더를 열 수 없습니다: {ex.Message}";
+        }
+    }
+
+    public async Task<string> BuildDiagnosticsReportAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var monitor = _monitor.GetDiagnosticsSnapshot();
+        var database = await _database.GetDiagnosticsAsync(cancellationToken);
+        var assembly = Assembly.GetEntryAssembly() ?? typeof(MainViewModel).Assembly;
+        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                          ?.InformationalVersion
+                      ?? assembly.GetName().Version?.ToString()
+                      ?? "알 수 없음";
+        var databaseBytes = TryGetFileSize(DatabasePath);
+        var builder = new StringBuilder();
+        builder.AppendLine("FindHistory 진단 정보")
+            .AppendLine($"생성 시각: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}")
+            .AppendLine($"앱 버전: {version}")
+            .AppendLine($"운영체제: {RuntimeInformation.OSDescription}")
+            .AppendLine($"프로세스: {RuntimeInformation.ProcessArchitecture} / .NET {Environment.Version}")
+            .AppendLine()
+            .AppendLine("[최근 항목 감시]")
+            .AppendLine($"상태: {FormatMonitorState(monitor)}")
+            .AppendLine($"감시 폴더: {monitor.RecentFolder}")
+            .AppendLine($"시작 시각: {FormatLocalTime(monitor.StartedUtc)}")
+            .AppendLine($"마지막 전체 스캔: {FormatLocalTime(monitor.LastScanCompletedUtc)}")
+            .AppendLine($"마지막 스캔 항목: {monitor.LastScanItemCount:N0}개")
+            .AppendLine($"마지막 스캔 시간: {FormatDuration(monitor.LastScanDuration)}")
+            .AppendLine($"마지막 실시간 기록: {FormatLocalTime(monitor.LastCaptureUtc)}")
+            .AppendLine($"세션 실시간 기록: {monitor.SessionCaptureCount:N0}개")
+            .AppendLine($"감시 복구 횟수: {monitor.WatcherRecoveryCount:N0}회")
+            .AppendLine($"진행 중 작업: {monitor.PendingTaskCount:N0}개")
+            .AppendLine($"마지막 오류: {FormatError(monitor)}")
+            .AppendLine()
+            .AppendLine("[데이터베이스]")
+            .AppendLine($"경로: {DatabasePath}")
+            .AppendLine($"파일 크기: {FormatBytes(databaseBytes)}")
+            .AppendLine($"고유 항목: {database.UniqueItems:N0}개")
+            .AppendLine($"누적 열기 횟수: {database.TotalOpenCount:N0}회")
+            .AppendLine($"저장된 날짜 이벤트: {database.StoredEvents:N0}개")
+            .AppendLine($"추정 날짜 이벤트: {database.EstimatedEvents:N0}개")
+            .AppendLine()
+            .AppendLine("[설정]")
+            .AppendLine($"로그인 시 자동 실행: {(AutoStartEnabled ? "사용" : "사용 안 함")}")
+            .AppendLine($"로그 폴더: {_log.LogDirectory}");
+        return builder.ToString().TrimEnd();
     }
 
     private void NotifyDatabaseLocationChanged()
@@ -364,6 +452,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Manual Recent Items refresh failed.", ex);
             StatusText = $"새로고침 실패: {ex.Message}";
         }
         finally
@@ -455,7 +544,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             }
 
             var start = selectedDate.Date;
-            return CreateLocalDateRange(start, start.AddDays(1), start.ToString("yyyy-MM-dd"));
+            return HistoryDateRangeFactory.CreateLocalCalendarRange(
+                start, start.AddDays(1), start.ToString("yyyy-MM-dd"));
         }
 
         if (SelectedDateRange.CalendarDayCount is not { } days)
@@ -466,16 +556,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var today = DateTime.Today;
         var startDate = today.AddDays(-(days - 1));
         var label = days == 1 ? "오늘" : SelectedDateRange.Label;
-        return CreateLocalDateRange(startDate, today.AddDays(1), label);
-    }
-
-    private static HistoryDateRange CreateLocalDateRange(DateTime startLocal, DateTime endLocal, string label)
-    {
-        var unspecifiedStart = DateTime.SpecifyKind(startLocal, DateTimeKind.Unspecified);
-        var unspecifiedEnd = DateTime.SpecifyKind(endLocal, DateTimeKind.Unspecified);
-        var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecifiedStart, TimeZoneInfo.Local));
-        var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecifiedEnd, TimeZoneInfo.Local));
-        return new HistoryDateRange(startUtc, endUtc, label);
+        return HistoryDateRangeFactory.CreateLocalCalendarRange(
+            startDate, today.AddDays(1), label);
     }
 
     private void OnHistoryChanged(object? sender, EventArgs e) =>
@@ -484,6 +566,24 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void OnMonitorError(object? sender, string message)
     {
         System.Windows.Application.Current.Dispatcher.InvokeAsync(() => StatusText = $"감시 오류: {message}");
+    }
+
+    private void OnDiagnosticsChanged(object? sender, EventArgs e) =>
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateMonitorStatus);
+
+    private void UpdateMonitorStatus()
+    {
+        var diagnostics = _monitor.GetDiagnosticsSnapshot();
+        IsMonitorHealthy = diagnostics.IsStarted &&
+                           !diagnostics.IsStopping &&
+                           diagnostics.IsWatcherActive;
+        MonitorStatusText = diagnostics.IsStopping
+            ? "기록 종료 중"
+            : IsMonitorHealthy
+                ? "백그라운드 기록 중"
+                : diagnostics.IsStarted
+                    ? "감시 복구 필요"
+                    : "기록 준비 중";
     }
 
     private void OpenSelected()
@@ -500,6 +600,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Opening a recent item failed.", ex);
             StatusText = $"열 수 없습니다: {ex.Message}";
         }
     }
@@ -528,8 +629,62 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
         catch (Exception ex)
         {
+            _log.Error("Revealing a recent item failed.", ex);
             StatusText = $"위치를 열 수 없습니다: {ex.Message}";
         }
+    }
+
+    private static string FormatMonitorState(MonitorDiagnostics monitor)
+    {
+        if (monitor.IsStopping)
+        {
+            return "종료 중";
+        }
+        if (!monitor.IsStarted)
+        {
+            return "시작 전";
+        }
+        return monitor.IsWatcherActive ? "정상 감시 중" : "감시기 비활성";
+    }
+
+    private static string FormatLocalTime(DateTimeOffset? utc) =>
+        utc is null ? "기록 없음" : utc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+
+    private static string FormatDuration(TimeSpan? duration) =>
+        duration is null ? "기록 없음" : $"{duration.Value.TotalMilliseconds:N0} ms";
+
+    private static string FormatError(MonitorDiagnostics monitor) =>
+        monitor.LastErrorUtc is null
+            ? "없음"
+            : $"{FormatLocalTime(monitor.LastErrorUtc)} · {monitor.LastErrorMessage}";
+
+    private static long? TryGetFileSize(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static string FormatBytes(long? bytes)
+    {
+        if (bytes is null)
+        {
+            return "확인 불가";
+        }
+        if (bytes >= 1024L * 1024L * 1024L)
+        {
+            return $"{bytes.Value / 1024d / 1024d / 1024d:N2} GB";
+        }
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes.Value / 1024d / 1024d:N1} MB";
+        }
+        return $"{Math.Max(1, bytes.Value / 1024d):N0} KB";
     }
 
     private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
@@ -556,6 +711,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _disposed = true;
         _monitor.HistoryChanged -= OnHistoryChanged;
         _monitor.MonitorError -= OnMonitorError;
+        _monitor.DiagnosticsChanged -= OnDiagnosticsChanged;
         _searchCancellation?.Cancel();
         _searchCancellation?.Dispose();
         _searchCancellation = null;

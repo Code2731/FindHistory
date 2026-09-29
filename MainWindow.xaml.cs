@@ -32,6 +32,12 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private void OnDiagnosticsClick(object sender, RoutedEventArgs e)
+    {
+        var window = new DiagnosticsWindow(_viewModel) { Owner = this };
+        window.ShowDialog();
+    }
+
     private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.K && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))

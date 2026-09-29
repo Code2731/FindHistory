@@ -37,6 +37,8 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 현재 DB를 다른 폴더로 이동하거나 기존 `findhistory.db` 선택
 - 창을 닫은 뒤에도 시스템 트레이에서 백그라운드 기록
 - 선택적인 Windows 로그인 시 자동 실행
+- 감시 상태·DB 통계·마지막 오류를 확인하는 진단 창
+- 14일 보관 및 파일 크기 회전을 적용한 로컬 진단 로그
 - SQLite FTS5 및 검색 인덱스를 사용한 대량 기록 검색
 - 네트워크 계정이나 클라우드 연결 없이 로컬에서 동작
 
@@ -108,6 +110,14 @@ dotnet publish -c Release --self-contained false -o publish
 %LocalAppData%\FindHistory\settings.json
 ```
 
+진단 로그 위치:
+
+```text
+%LocalAppData%\FindHistory\Logs
+```
+
+진단 로그는 로컬에만 저장되며 14일이 지난 파일은 앱 시작 시 자동으로 정리됩니다. 오류 메시지에는 접근 중이던 로컬 경로가 포함될 수 있으므로 공유하기 전에 내용을 확인하세요.
+
 메인 화면의 **데이터 저장소**에서 기록을 유지한 채 DB를 다른 폴더로 옮기거나, 다른 위치의 기존 `findhistory.db`를 선택할 수 있습니다. DB는 실행 파일과 별도로 유지되므로 앱을 업데이트하거나 게시 폴더를 교체해도 기록이 남습니다.
 
 SQLite DB는 로컬 드라이브 또는 외장 드라이브에 두는 것을 권장합니다. OneDrive 같은 실시간 동기화 폴더는 여러 장치나 프로세스가 동시에 DB에 접근할 때 충돌할 수 있습니다.
@@ -135,6 +145,8 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
 ```
 
 현재 최적화된 기준 구현은 10만 건 DB에서 최신 1,000건 조회 약 **4.21 ms**, `*.pdf` 1,000건 조회 약 **6.10 ms**, 최근 7일 이벤트 1,000건 조회 약 **13.42 ms**를 기록했습니다. 수치는 개발 환경에 따라 달라지며, 측정 방법과 100만 건 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 정리되어 있습니다.
+
+다음 개발 단계와 완료 조건은 [개발 로드맵](docs/ROADMAP.md)에서 확인할 수 있습니다.
 
 ### 기술 구성
 
@@ -167,6 +179,8 @@ Your history is not sent to an external server. It remains in the database file 
 - Moves the current database or switches to an existing `findhistory.db`
 - Keeps recording in the system tray after the window is closed
 - Optional background startup at Windows sign-in
+- Diagnostics window for watcher health, database statistics, and the latest error
+- Local diagnostic logs with 14-day retention and size-based rotation
 - Uses SQLite FTS5 and dedicated indexes for large histories
 - Works locally without an account or cloud connection
 
@@ -238,6 +252,14 @@ Settings location:
 %LocalAppData%\FindHistory\settings.json
 ```
 
+Diagnostic log location:
+
+```text
+%LocalAppData%\FindHistory\Logs
+```
+
+Diagnostic logs remain local and files older than 14 days are removed at application startup. Error messages may contain a local path that was being accessed, so review the content before sharing it.
+
 Use **Data storage** on the main screen to move the database without losing existing history, or select an existing `findhistory.db` elsewhere. The database is kept separately from the executable, so replacing or updating the publish directory does not remove your history.
 
 A local or external drive is recommended. Real-time synchronization folders such as OneDrive may cause conflicts if multiple devices or processes access the SQLite database concurrently.
@@ -265,6 +287,8 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
 ```
 
 On the current development setup, the optimized implementation measured approximately **4.21 ms** for the newest 1,000 rows in a 100,000-row database, **6.10 ms** for 1,000 `*.pdf` results, and **13.42 ms** for 1,000 events from the last seven days. Results vary by machine. See the [performance report](docs/PERFORMANCE_2026-09-24.md) for the methodology and 1-million-row results.
+
+See the [development roadmap](docs/ROADMAP.md) for the next milestones and their completion gates.
 
 ### Technology
 
