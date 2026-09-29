@@ -67,9 +67,14 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 
 날짜 이력을 최대한 정확하게 남기려면 **Windows 로그인 시 백그라운드 실행**을 켜 두는 것을 권장합니다.
 
+### 다운로드
+
+[GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest)에서 `FindHistory-v1.0-win-x64.zip`을 내려받아 압축을 풀고 `FindHistory.exe`를 실행하세요. 공식 ZIP은 .NET 런타임을 포함하므로 별도로 설치할 필요가 없습니다.
+
 ### 요구 사항
 
 - Windows 10 또는 Windows 11
+- 공식 `win-x64` ZIP: 별도 런타임 불필요
 - 소스에서 실행/빌드: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - 프레임워크 종속 게시본 실행: .NET 10 Desktop Runtime
 
@@ -192,9 +197,14 @@ Date history is subject to limitations in the Windows Recent Items source:
 
 For the most accurate date history, enable **background startup at Windows sign-in**.
 
+### Download
+
+Download `FindHistory-v1.0-win-x64.zip` from [GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest), extract it, and run `FindHistory.exe`. The official ZIP is self-contained, so no separate .NET runtime installation is required.
+
 ### Requirements
 
 - Windows 10 or Windows 11
+- Official `win-x64` ZIP: no separate runtime required
 - To run or build from source: [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - To run a framework-dependent publish: .NET 10 Desktop Runtime
 
