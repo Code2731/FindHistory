@@ -30,7 +30,8 @@ public partial class App : System.Windows.Application
         var isScreenshotRun = screenshotsEnabled &&
                               (HasOutputArgument(e.Args, "--screenshot") ||
                                HasOutputArgument(e.Args, "--screenshot-settings") ||
-                               HasOutputArgument(e.Args, "--screenshot-diagnostics"));
+                               HasOutputArgument(e.Args, "--screenshot-diagnostics") ||
+                               HasOutputArgument(e.Args, "--screenshot-inactive-selection"));
         var mutexName = isScreenshotRun
             ? $"FindHistory.Isolated.{Environment.ProcessId}"
             : "FindHistory.SingleInstance";
@@ -76,6 +77,11 @@ public partial class App : System.Windows.Application
                 ? Array.FindIndex(e.Args,
                     arg => arg.Equals("--screenshot", StringComparison.OrdinalIgnoreCase))
                 : -1;
+            var inactiveSelectionScreenshotIndex = screenshotsEnabled
+                ? Array.FindIndex(e.Args,
+                    arg => arg.Equals("--screenshot-inactive-selection",
+                        StringComparison.OrdinalIgnoreCase))
+                : -1;
             var isBackground = e.Args.Contains("--background", StringComparer.OrdinalIgnoreCase);
             if (!isBackground && !isScreenshotRun)
             {
@@ -105,6 +111,17 @@ public partial class App : System.Windows.Application
                     () => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 SaveScreenshot(diagnosticsWindow, e.Args[diagnosticsScreenshotIndex + 1]);
                 diagnosticsWindow.Close();
+                await ExitApplicationAsync();
+            }
+            else if (inactiveSelectionScreenshotIndex >= 0 &&
+                     inactiveSelectionScreenshotIndex + 1 < e.Args.Length)
+            {
+                _window.Show();
+                _window.PrepareInactiveSelectionScreenshot();
+                _window.UpdateLayout();
+                await Dispatcher.InvokeAsync(
+                    () => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                SaveScreenshot(_window, e.Args[inactiveSelectionScreenshotIndex + 1]);
                 await ExitApplicationAsync();
             }
             else if (screenshotIndex >= 0 && screenshotIndex + 1 < e.Args.Length)

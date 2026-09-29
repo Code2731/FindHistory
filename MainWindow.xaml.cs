@@ -48,6 +48,20 @@ public partial class MainWindow : Window
         }
     }
 
+    internal bool PrepareInactiveSelectionScreenshot()
+    {
+        if (ResultsGrid.Items.Count == 0)
+        {
+            return false;
+        }
+
+        ResultsGrid.SelectedIndex = 0;
+        ResultsGrid.ScrollIntoView(ResultsGrid.SelectedItem);
+        SearchBox.Focus();
+        Keyboard.Focus(SearchBox);
+        return true;
+    }
+
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         var handle = new WindowInteropHelper(this).Handle;

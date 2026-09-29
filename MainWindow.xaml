@@ -142,9 +142,10 @@
         <Border Grid.Row="6" CornerRadius="12" Background="{StaticResource SurfaceBrush}"
                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" ClipToBounds="True">
             <Grid>
-                <DataGrid ItemsSource="{Binding Items}" SelectedItem="{Binding SelectedItem}"
+                <DataGrid x:Name="ResultsGrid"
+                          ItemsSource="{Binding Items}" SelectedItem="{Binding SelectedItem}"
                           AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
-                          GridLinesVisibility="None" SelectionMode="Single"
+                          GridLinesVisibility="None" SelectionMode="Single" SelectionUnit="FullRow"
                           Background="Transparent" Foreground="{StaticResource TextBrush}"
                           BorderThickness="0" RowHeaderWidth="0" RowHeight="62"
                           ColumnHeaderHeight="38" MouseDoubleClick="OnResultDoubleClick"
@@ -153,6 +154,14 @@
                           VirtualizingPanel.IsVirtualizing="True"
                           VirtualizingPanel.VirtualizationMode="Recycling">
                     <DataGrid.Resources>
+                        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"
+                                         Color="#143246" />
+                        <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"
+                                         Color="#143246" />
+                        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}"
+                                         Color="#F5F5F7" />
+                        <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"
+                                         Color="#F5F5F7" />
                         <Style TargetType="DataGridRow">
                             <Setter Property="Background" Value="Transparent" />
                             <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
@@ -169,11 +178,19 @@
                             </Style.Triggers>
                         </Style>
                         <Style TargetType="DataGridCell">
+                            <Setter Property="Background" Value="Transparent" />
                             <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
                             <Setter Property="BorderThickness" Value="0" />
                             <Setter Property="Padding" Value="14,0" />
                             <Setter Property="VerticalContentAlignment" Value="Center" />
                             <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                            <Style.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background"
+                                            Value="{StaticResource AccentContainerBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
                         </Style>
                         <Style TargetType="DataGridColumnHeader">
                             <Setter Property="Background" Value="#131318" />
