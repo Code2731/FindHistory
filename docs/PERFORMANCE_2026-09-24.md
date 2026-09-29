@@ -86,3 +86,27 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
 ```powershell
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --recent-only
 ```
+
+## 2026-09-29 .NET 10 재검증
+
+환경: Windows 10.0.26200, .NET 10.0.2, Microsoft.Data.Sqlite 10.0.12, Release 빌드
+
+- 10만 건 최신 1,000개: 중앙값 4.43 ms
+- 10만 건 희귀 파일명: 중앙값 12.53 ms
+- 10만 건 결과 없음: 중앙값 2.09 ms
+- 10만 건 `*.pdf` 확장자 와일드카드: 중앙값 6.11 ms, 1,000개 반환
+- UI 데이터와 요약 통계 동시 조회: 중앙값 32.72 ms → 14.05 ms
+- 10만 개 열기 이벤트의 최근 7일 조회: 중앙값 13.42 ms, 1,000개 반환
+- 최근 항목 259개 배치 저장: 27.4 ms
+- WPF 실제 기동, 1,085개 바로가기 초기 스캔, 화면 렌더, 비동기 종료 확인
+
+UI 동시 조회 개선은 매 검색마다 `COUNT(*)`와 `SUM(open_count)`로 전체 테이블을 읽던 경로를
+SQLite 트리거가 유지하는 1행 `history_stats` 조회로 바꾼 결과다. 또한 DB 작업은 UI 스레드 밖에서
+실행하고, 검색 결과 목록은 행마다 추가하지 않고 `ItemsSource`를 한 번 교체하도록 변경했다.
+`*.mp4`처럼 정확한 단일 확장자 패턴은 `(extension, last_seen_utc)` 복합 인덱스를 사용하며,
+`clip_20??.mp4`처럼 더 일반적인 패턴은 매개변수화된 LIKE 검색으로 처리한다.
+
+날짜별 개별 이벤트 10만 건을 함께 저장한 DB는 82.9 MB로, 파일 집계만 저장했을 때의 65.4 MB보다
+약 17.5 MB 증가했다. 이벤트당 약 175바이트 수준이며, 날짜 범위 조회는 `(opened_utc,
+recent_item_id)` 인덱스를 사용한다. 이벤트 기록이 추가된 배치 수집은 이 측정에서 약 4,485
+items/sec로, Windows Recent의 실제 발생량에는 충분한 여유가 있다.

@@ -98,9 +98,14 @@ static async Task RunSearchScaleAsync(string root, int count)
     await PrintMeasurementAsync("latest 1000", () => database.SearchAsync(string.Empty, null));
     await PrintMeasurementAsync("unique filename", () => database.SearchAsync(targetToken, null));
     await PrintMeasurementAsync("path + extension", () => database.SearchAsync("Project042 PDF", null));
+    await PrintMeasurementAsync("extension glob", () => database.SearchAsync("*.pdf", null));
     await PrintMeasurementAsync("common token", () => database.SearchAsync("report", null));
     await PrintMeasurementAsync("missing token", () => database.SearchAsync("definitely_not_present_xyz", null));
     await PrintMeasurementAsync("recent 7 days", () => database.SearchAsync(string.Empty, DateTimeOffset.Now.AddDays(-7)));
+    await PrintSnapshotMeasurementAsync("UI data + stats", () => database.SearchWithStatsAsync(targetToken, null));
+    var eventRange = new HistoryDateRange(
+        DateTimeOffset.UtcNow.AddDays(-7), DateTimeOffset.UtcNow.AddDays(1), "최근 7일");
+    await PrintSnapshotMeasurementAsync("event date 7d", () => database.SearchWithStatsAsync(string.Empty, eventRange));
     Console.WriteLine();
 }
 
@@ -157,6 +162,16 @@ static async Task<TimeSpan> SeedAsync(string databasePath, int count)
         countParameter.Value = 1 + i % 20;
         await command.ExecuteNonQueryAsync();
     }
+
+    await using (var eventCommand = connection.CreateCommand())
+    {
+        eventCommand.Transaction = (SqliteTransaction)transaction;
+        eventCommand.CommandText = """
+            INSERT INTO open_events (recent_item_id, opened_utc, source_link_path, is_estimated)
+            SELECT id, last_seen_utc, source_link_path, 0 FROM recent_items;
+            """;
+        await eventCommand.ExecuteNonQueryAsync();
+    }
     await transaction.CommitAsync();
     started.Stop();
 
@@ -180,6 +195,28 @@ static async Task PrintMeasurementAsync(string name, Func<Task<IReadOnlyList<Rec
         started.Stop();
         timings[i] = started.Elapsed.TotalMilliseconds;
         resultCount = results.Count;
+    }
+    var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+    Array.Sort(timings);
+    Console.WriteLine($"  {name,-18} | median {timings[iterations / 2],8:N2} ms | " +
+                      $"p95 {timings[^1],8:N2} ms | {resultCount,4:N0} rows | " +
+                      $"alloc {FormatBytes(allocated / iterations)}/op");
+}
+
+static async Task PrintSnapshotMeasurementAsync(string name, Func<Task<SearchSnapshot>> action)
+{
+    await action();
+    const int iterations = 7;
+    var timings = new double[iterations];
+    var resultCount = 0;
+    var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+    for (var i = 0; i < iterations; i++)
+    {
+        var started = Stopwatch.StartNew();
+        var snapshot = await action();
+        started.Stop();
+        timings[i] = started.Elapsed.TotalMilliseconds;
+        resultCount = snapshot.Items.Count;
     }
     var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
     Array.Sort(timings);

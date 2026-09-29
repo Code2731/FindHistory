@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="FindHistory" Height="760" Width="1160"
+        Icon="Assets/findhistory.ico"
         MinHeight="620" MinWidth="920"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource PageBrush}"
@@ -57,13 +58,15 @@
                     <ColumnDefinition Width="150" />
                     <ColumnDefinition Width="10" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="10" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
                 <Grid Grid.Column="0">
                     <TextBox x:Name="SearchBox"
                              Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
                              FontSize="17" Padding="16,12,82,12" />
-                    <TextBlock Text="파일명이나 경로를 검색하세요" FontSize="16"
+                    <TextBlock Text="파일명이나 경로 검색 (예: *.mp4)" FontSize="16"
                                IsHitTestVisible="False" Margin="17,0,0,0" VerticalAlignment="Center">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock" BasedOn="{StaticResource TertiaryText}">
@@ -88,11 +91,26 @@
                           VerticalContentAlignment="Center">
                     <ComboBox.ItemTemplate>
                         <DataTemplate>
-                            <TextBlock Text="{Binding Label}" Foreground="#17171C" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding Label}" Foreground="{StaticResource TextBrush}"
+                                       FontWeight="SemiBold" />
                         </DataTemplate>
                     </ComboBox.ItemTemplate>
                 </ComboBox>
-                <Button Grid.Column="4" Content="새로고침" Command="{Binding RefreshCommand}" />
+                <DatePicker Grid.Column="4" Width="150"
+                            SelectedDate="{Binding SpecificDate, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                            SelectedDateFormat="Short" ToolTip="조회할 날짜를 선택합니다">
+                    <DatePicker.Style>
+                        <Style TargetType="DatePicker" BasedOn="{StaticResource {x:Type DatePicker}}">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsSpecificDateSelected}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DatePicker.Style>
+                </DatePicker>
+                <Button Grid.Column="6" Content="새로고침" Command="{Binding RefreshCommand}" />
             </Grid>
         </Border>
 

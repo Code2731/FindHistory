@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -8,7 +7,7 @@ using FindHistory.Services;
 
 namespace FindHistory.ViewModels;
 
-public sealed class MainViewModel : INotifyPropertyChanged
+public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly RecentDatabase _database;
     private readonly RecentItemsMonitor _monitor;
@@ -18,22 +17,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private long _loadSequence;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
+    private DateTime? _specificDate = DateTime.Today;
     private RecentItem? _selectedItem;
     private string _statusText = "최근 항목을 불러오는 중…";
     private string _summaryText = "기록 준비 중";
     private bool _autoStartEnabled;
     private bool _isBusy;
     private bool _initialized;
+    private bool _disposed;
+    private IReadOnlyList<RecentItem> _items = [];
+    private double _lastSearchLatencyMilliseconds;
 
-    public ObservableCollection<RecentItem> Items { get; } = [];
+    public IReadOnlyList<RecentItem> Items
+    {
+        get => _items;
+        private set => SetField(ref _items, value);
+    }
 
     public IReadOnlyList<DateRangeOption> DateRanges { get; } =
     [
-        new("전체 기간", null),
-        new("오늘", TimeSpan.FromDays(1)),
-        new("최근 7일", TimeSpan.FromDays(7)),
-        new("최근 30일", TimeSpan.FromDays(30)),
-        new("최근 1년", TimeSpan.FromDays(365))
+        new("전체 기간"),
+        new("오늘", 1),
+        new("최근 7일", 7),
+        new("최근 30일", 30),
+        new("최근 1년", 365),
+        new("날짜 지정", IsSpecificDate: true)
     ];
 
     public MainViewModel(
@@ -82,6 +90,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             if (value is not null && SetField(ref _selectedDateRange, value))
             {
+                OnPropertyChanged(nameof(IsSpecificDateSelected));
+                ScheduleReload();
+            }
+        }
+    }
+
+    public bool IsSpecificDateSelected => SelectedDateRange.IsSpecificDate;
+
+    public DateTime? SpecificDate
+    {
+        get => _specificDate;
+        set
+        {
+            var normalizedDate = (value ?? DateTime.Today).Date;
+            if (SetField(ref _specificDate, normalizedDate) && IsSpecificDateSelected)
+            {
                 ScheduleReload();
             }
         }
@@ -110,6 +134,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get => _summaryText;
         private set => SetField(ref _summaryText, value);
+    }
+
+    public double LastSearchLatencyMilliseconds
+    {
+        get => _lastSearchLatencyMilliseconds;
+        private set => SetField(ref _lastSearchLatencyMilliseconds, value);
     }
 
     public string DatabasePath => _database.DatabasePath;
@@ -258,9 +288,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         IsBusy = true;
         StatusText = "선택한 데이터베이스를 확인하는 중…";
+        var previousPath = _database.DatabasePath;
+        var settingsUpdateAttempted = false;
         try
         {
             await _database.UseAsync(databasePath);
+            settingsUpdateAttempted = true;
             _settings.SetDatabasePath(_database.DatabasePath);
             NotifyDatabaseLocationChanged();
             await LoadAsync(CancellationToken.None);
@@ -269,7 +302,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            StatusText = $"데이터베이스를 열 수 없습니다: {ex.Message}";
+            var restored = true;
+            if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    await _database.UseAsync(previousPath);
+                }
+                catch (Exception)
+                {
+                    restored = false;
+                }
+            }
+
+            if (settingsUpdateAttempted)
+            {
+                restored &= TryRestoreSettingsPath(previousPath);
+            }
+            StatusText = restored
+                ? $"데이터베이스를 열 수 없습니다: {ex.Message}"
+                : $"데이터베이스를 열 수 없습니다: {ex.Message} (이전 설정 복원도 실패했습니다)";
             return false;
         }
         finally
@@ -306,7 +358,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusText = "최근 항목을 다시 확인하는 중…";
         try
         {
-            var captured = await _monitor.ScanAsync();
+            var captured = await _monitor.ScanAsync(notifyChanges: false);
             await LoadAsync(CancellationToken.None);
             StatusText = $"최근 항목 {captured:N0}개를 확인했습니다.";
         }
@@ -322,17 +374,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void ScheduleReload()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _loadSequence);
         _searchCancellation?.Cancel();
         _searchCancellation?.Dispose();
         _searchCancellation = new CancellationTokenSource();
         var token = _searchCancellation.Token;
+        var requestStartedTimestamp = Stopwatch.GetTimestamp();
 
         _ = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(220, token);
-                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() => LoadAsync(token)).Task.Unwrap();
+                await Task.Delay(140, token);
+                await System.Windows.Application.Current.Dispatcher
+                    .InvokeAsync(() => LoadAsync(token, requestStartedTimestamp)).Task.Unwrap();
             }
             catch (OperationCanceledException)
             {
@@ -341,33 +401,81 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }, token);
     }
 
-    private async Task LoadAsync(CancellationToken cancellationToken)
+    private async Task LoadAsync(
+        CancellationToken cancellationToken,
+        long? requestStartedTimestamp = null)
     {
-        var sequence = ++_loadSequence;
+        var loadStartedTimestamp = Stopwatch.GetTimestamp();
+        var sequence = Interlocked.Increment(ref _loadSequence);
         var selectedId = SelectedItem?.Id;
-        var since = SelectedDateRange.Duration is { } duration
-            ? DateTimeOffset.Now.Subtract(duration)
-            : (DateTimeOffset?)null;
-        var items = await _database.SearchAsync(SearchText, since, cancellationToken: cancellationToken);
-        var stats = await _database.GetStatsAsync(cancellationToken);
+        var searchText = SearchText;
+        var dateRange = BuildSelectedDateRange();
+        var snapshot = await Task.Run(
+            () => _database.SearchWithStatsAsync(searchText, dateRange, cancellationToken: cancellationToken),
+            cancellationToken);
 
-        if (sequence != _loadSequence)
+        if (sequence != Volatile.Read(ref _loadSequence))
         {
             return;
         }
 
-        Items.Clear();
-        foreach (var item in items)
-        {
-            Items.Add(item);
-        }
+        // ItemsSource 자체를 한 번 교체해 1,000개 행에서 발생하던 개별 CollectionChanged를 제거한다.
+        Items = snapshot.Items;
 
         if (selectedId is { } id)
         {
             SelectedItem = Items.FirstOrDefault(item => item.Id == id);
         }
 
-        SummaryText = $"{items.Count:N0}개 결과  ·  {stats.UniqueItems:N0}개 항목  ·  누적 {stats.TotalOpenCount:N0}회";
+        var latencyStartedTimestamp = requestStartedTimestamp ?? loadStartedTimestamp;
+        LastSearchLatencyMilliseconds = Stopwatch.GetElapsedTime(latencyStartedTimestamp).TotalMilliseconds;
+        if (dateRange is null)
+        {
+            SummaryText = $"{snapshot.Items.Count:N0}개 결과  ·  {snapshot.Stats.UniqueItems:N0}개 항목  ·  " +
+                          $"누적 {snapshot.Stats.TotalOpenCount:N0}회";
+        }
+        else
+        {
+            var rangeOpenCount = snapshot.Items.Sum(item => item.OpenCount);
+            var estimatedText = snapshot.Items.Any(item => item.IsEstimatedHistory)
+                ? "  ·  이전 기록 일부 추정"
+                : string.Empty;
+            SummaryText = $"{snapshot.Items.Count:N0}개 결과  ·  {dateRange.Label} {rangeOpenCount:N0}회" +
+                          estimatedText;
+        }
+    }
+
+    private HistoryDateRange? BuildSelectedDateRange()
+    {
+        if (SelectedDateRange.IsSpecificDate)
+        {
+            if (SpecificDate is not { } selectedDate)
+            {
+                return null;
+            }
+
+            var start = selectedDate.Date;
+            return CreateLocalDateRange(start, start.AddDays(1), start.ToString("yyyy-MM-dd"));
+        }
+
+        if (SelectedDateRange.CalendarDayCount is not { } days)
+        {
+            return null;
+        }
+
+        var today = DateTime.Today;
+        var startDate = today.AddDays(-(days - 1));
+        var label = days == 1 ? "오늘" : SelectedDateRange.Label;
+        return CreateLocalDateRange(startDate, today.AddDays(1), label);
+    }
+
+    private static HistoryDateRange CreateLocalDateRange(DateTime startLocal, DateTime endLocal, string label)
+    {
+        var unspecifiedStart = DateTime.SpecifyKind(startLocal, DateTimeKind.Unspecified);
+        var unspecifiedEnd = DateTime.SpecifyKind(endLocal, DateTimeKind.Unspecified);
+        var startUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecifiedStart, TimeZoneInfo.Local));
+        var endUtc = new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecifiedEnd, TimeZoneInfo.Local));
+        return new HistoryDateRange(startUtc, endUtc, label);
     }
 
     private void OnHistoryChanged(object? sender, EventArgs e) =>
@@ -437,4 +545,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _monitor.HistoryChanged -= OnHistoryChanged;
+        _monitor.MonitorError -= OnMonitorError;
+        _searchCancellation?.Cancel();
+        _searchCancellation?.Dispose();
+        _searchCancellation = null;
+    }
 }

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using FindHistory.Models;
 using Microsoft.Data.Sqlite;
 
@@ -10,6 +11,7 @@ public sealed class RecentDatabase : IDisposable
     private string _databasePath;
     private bool _ftsAvailable;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
+    private int _disposeState;
 
     private const string UpsertSql = """
         INSERT INTO recent_items (
@@ -32,7 +34,8 @@ public sealed class RecentDatabase : IDisposable
             last_link_write_utc = CASE
                 WHEN excluded.last_link_write_utc > recent_items.last_link_write_utc
                 THEN excluded.last_link_write_utc ELSE recent_items.last_link_write_utc END,
-            exists_flag = excluded.exists_flag;
+            exists_flag = excluded.exists_flag
+        RETURNING id;
         """;
 
     public RecentDatabase(string databasePath)
@@ -43,7 +46,18 @@ public sealed class RecentDatabase : IDisposable
 
     public string DatabasePath => _databasePath;
 
-    public void Dispose() => _databaseGate.Dispose();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+        {
+            return;
+        }
+
+        // 진행 중인 읽기/쓰기가 gate를 반환한 뒤에만 SemaphoreSlim을 폐기한다.
+        _databaseGate.Wait();
+        _databaseGate.Release();
+        _databaseGate.Dispose();
+    }
 
     private static string BuildConnectionString(string databasePath) =>
         new SqliteConnectionStringBuilder
@@ -56,6 +70,7 @@ public sealed class RecentDatabase : IDisposable
 
     public async Task InitializeAsync()
     {
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync();
         try
         {
@@ -94,20 +109,76 @@ public sealed class RecentDatabase : IDisposable
                 ON recent_items(last_seen_utc DESC);
             CREATE INDEX IF NOT EXISTS ix_recent_items_display_name
                 ON recent_items(display_name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS ix_recent_items_extension_last_seen
+                ON recent_items(extension COLLATE NOCASE, last_seen_utc DESC);
+
+            CREATE TABLE IF NOT EXISTS open_events (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                recent_item_id     INTEGER NOT NULL,
+                opened_utc         TEXT NOT NULL,
+                source_link_path   TEXT NOT NULL,
+                is_estimated       INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(recent_item_id, opened_utc),
+                FOREIGN KEY(recent_item_id) REFERENCES recent_items(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_open_events_opened_item
+                ON open_events(opened_utc, recent_item_id);
+
+            INSERT OR IGNORE INTO open_events (
+                recent_item_id, opened_utc, source_link_path, is_estimated)
+            SELECT id, last_seen_utc, source_link_path, 1
+            FROM recent_items;
+
+            CREATE TABLE IF NOT EXISTS history_stats (
+                id               INTEGER PRIMARY KEY CHECK (id = 1),
+                unique_items     INTEGER NOT NULL,
+                total_open_count INTEGER NOT NULL
+            );
+
+            INSERT OR REPLACE INTO history_stats (id, unique_items, total_open_count)
+            SELECT 1, COUNT(*), COALESCE(SUM(open_count), 0) FROM recent_items;
+
+            CREATE TRIGGER IF NOT EXISTS recent_items_stats_ai AFTER INSERT ON recent_items BEGIN
+                UPDATE history_stats
+                SET unique_items = unique_items + 1,
+                    total_open_count = total_open_count + new.open_count
+                WHERE id = 1;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS recent_items_stats_ad AFTER DELETE ON recent_items BEGIN
+                UPDATE history_stats
+                SET unique_items = unique_items - 1,
+                    total_open_count = total_open_count - old.open_count
+                WHERE id = 1;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS recent_items_stats_au
+            AFTER UPDATE OF open_count ON recent_items
+            WHEN new.open_count <> old.open_count BEGIN
+                UPDATE history_stats
+                SET total_open_count = total_open_count + new.open_count - old.open_count
+                WHERE id = 1;
+            END;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
         _ftsAvailable = await EnsureSearchIndexAsync(connection, cancellationToken);
     }
 
-    public async Task UpsertAsync(RecentItemCandidate item)
+    public async Task UpsertAsync(RecentItemCandidate item, CancellationToken cancellationToken = default)
     {
-        await _databaseGate.WaitAsync();
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken);
         try
         {
-            await using var connection = await OpenAsync();
-            await using var command = CreateUpsertCommand(connection);
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            await using var command = CreateUpsertCommand(connection, (SqliteTransaction)transaction);
+            await using var eventCommand = CreateOpenEventCommand(connection, (SqliteTransaction)transaction);
             BindUpsertParameters(command, item);
-            await command.ExecuteNonQueryAsync();
+            var itemId = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+            await InsertOpenEventAsync(eventCommand, itemId, item, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
         }
         finally
         {
@@ -118,6 +189,7 @@ public sealed class RecentDatabase : IDisposable
     public async Task UpsertManyAsync(IReadOnlyCollection<RecentItemCandidate> items,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         if (items.Count == 0)
         {
             return;
@@ -129,10 +201,12 @@ public sealed class RecentDatabase : IDisposable
             await using var connection = await OpenAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await using var command = CreateUpsertCommand(connection, (SqliteTransaction)transaction);
+            await using var eventCommand = CreateOpenEventCommand(connection, (SqliteTransaction)transaction);
             foreach (var item in items)
             {
                 BindUpsertParameters(command, item);
-                await command.ExecuteNonQueryAsync(cancellationToken);
+                var itemId = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+                await InsertOpenEventAsync(eventCommand, itemId, item, cancellationToken);
             }
             await transaction.CommitAsync(cancellationToken);
         }
@@ -148,68 +222,12 @@ public sealed class RecentDatabase : IDisposable
         int limit = 1000,
         CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-
-            var conditions = new List<string>();
-            var tokens = searchText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            var ftsQuery = BuildFtsQuery(tokens);
-            var useFts = ftsQuery is not null && _ftsAvailable &&
-                         await IsSelectiveFtsQueryAsync(connection, ftsQuery, limit, cancellationToken);
-            if (useFts)
-            {
-                conditions.Add("id IN (SELECT rowid FROM recent_items_fts WHERE recent_items_fts MATCH $ftsQuery)");
-                command.Parameters.AddWithValue("$ftsQuery", ftsQuery!);
-            }
-            else
-            {
-                for (var i = 0; i < tokens.Length; i++)
-                {
-                    conditions.Add($"(display_name LIKE $query{i} ESCAPE '\\' OR target_path LIKE $query{i} ESCAPE '\\')");
-                    command.Parameters.AddWithValue($"$query{i}", $"%{EscapeLike(tokens[i])}%");
-                }
-            }
-
-            if (since is not null)
-            {
-                conditions.Add("last_seen_utc >= $sinceUtc");
-                command.Parameters.AddWithValue("$sinceUtc", since.Value.UtcDateTime.ToString("O"));
-            }
-
-            var where = conditions.Count == 0 ? string.Empty : $"WHERE {string.Join(" AND ", conditions)}";
-            command.CommandText = $"""
-            SELECT id, target_path, display_name, extension, item_kind, source_link_path,
-                   first_seen_utc, last_seen_utc, open_count, exists_flag
-            FROM recent_items
-            {where}
-            ORDER BY last_seen_utc DESC
-            LIMIT $limit;
-            """;
-            command.Parameters.AddWithValue("$limit", limit);
-
-            var results = new List<RecentItem>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                results.Add(new RecentItem(
-                    reader.GetInt64(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    reader.GetString(3),
-                    reader.GetString(4),
-                    reader.GetString(5),
-                    DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind),
-                    DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture,
-                        DateTimeStyles.RoundtripKind),
-                    reader.GetInt32(8),
-                    reader.GetInt32(9) == 1));
-            }
-
-            return results;
+            return await SearchCoreAsync(connection, searchText, since, null, limit, cancellationToken);
         }
         finally
         {
@@ -219,15 +237,33 @@ public sealed class RecentDatabase : IDisposable
 
     public async Task<HistoryStats> GetStatsAsync(CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT COUNT(*), COALESCE(SUM(open_count), 0) FROM recent_items;";
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            await reader.ReadAsync(cancellationToken);
-            return new HistoryStats(reader.GetInt64(0), reader.GetInt64(1));
+            return await GetStatsCoreAsync(connection, cancellationToken);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<SearchSnapshot> SearchWithStatsAsync(
+        string searchText,
+        HistoryDateRange? dateRange,
+        int limit = 1000,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            var items = await SearchCoreAsync(connection, searchText, null, dateRange, limit, cancellationToken);
+            var stats = await GetStatsCoreAsync(connection, cancellationToken);
+            return new SearchSnapshot(items, stats);
         }
         finally
         {
@@ -237,6 +273,7 @@ public sealed class RecentDatabase : IDisposable
 
     public async Task MoveToAsync(string destinationPath, CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         var targetPath = Path.GetFullPath(destinationPath);
         await _databaseGate.WaitAsync(cancellationToken);
         try
@@ -270,6 +307,7 @@ public sealed class RecentDatabase : IDisposable
 
     public async Task UseAsync(string databasePath, CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         var targetPath = Path.GetFullPath(databasePath);
         if (!File.Exists(targetPath))
         {
@@ -280,9 +318,22 @@ public sealed class RecentDatabase : IDisposable
         try
         {
             await ValidateFindHistoryDatabaseAsync(targetPath, cancellationToken);
+            var previousPath = _databasePath;
+            var previousConnectionString = _connectionString;
+            var previousFtsAvailable = _ftsAvailable;
             _databasePath = targetPath;
             _connectionString = BuildConnectionString(_databasePath);
-            await InitializeCoreAsync(cancellationToken);
+            try
+            {
+                await InitializeCoreAsync(cancellationToken);
+            }
+            catch
+            {
+                _databasePath = previousPath;
+                _connectionString = previousConnectionString;
+                _ftsAvailable = previousFtsAvailable;
+                throw;
+            }
         }
         finally
         {
@@ -338,6 +389,123 @@ public sealed class RecentDatabase : IDisposable
         return connection;
     }
 
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(
+        Volatile.Read(ref _disposeState) != 0, this);
+
+    private async Task<IReadOnlyList<RecentItem>> SearchCoreAsync(
+        SqliteConnection connection,
+        string searchText,
+        DateTimeOffset? since,
+        HistoryDateRange? eventRange,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+
+        var conditions = new List<string>();
+        var tokens = searchText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var ftsQuery = BuildFtsQuery(tokens);
+        var useFts = ftsQuery is not null && _ftsAvailable &&
+                     await IsSelectiveFtsQueryAsync(connection, ftsQuery, limit, cancellationToken);
+        if (useFts)
+        {
+            conditions.Add("r.id IN (SELECT rowid FROM recent_items_fts WHERE recent_items_fts MATCH $ftsQuery)");
+            command.Parameters.AddWithValue("$ftsQuery", ftsQuery!);
+        }
+        else
+        {
+            for (var i = 0; i < tokens.Length; i++)
+            {
+                if (TryGetExactExtensionPattern(tokens[i], out var extension))
+                {
+                    conditions.Add($"r.extension = $query{i} COLLATE NOCASE");
+                    command.Parameters.AddWithValue($"$query{i}", extension);
+                }
+                else
+                {
+                    conditions.Add($"(r.display_name LIKE $query{i} ESCAPE '\\' OR r.target_path LIKE $query{i} ESCAPE '\\')");
+                    command.Parameters.AddWithValue($"$query{i}", BuildLikePattern(tokens[i]));
+                }
+            }
+        }
+
+        if (since is not null)
+        {
+            conditions.Add("r.last_seen_utc >= $sinceUtc");
+            command.Parameters.AddWithValue("$sinceUtc", since.Value.UtcDateTime.ToString("O"));
+        }
+
+        var eventJoin = string.Empty;
+        var lastSeenColumn = "r.last_seen_utc";
+        var openCountColumn = "r.open_count";
+        var estimatedColumn = "0";
+        if (eventRange is not null)
+        {
+            eventJoin = """
+                INNER JOIN (
+                    SELECT recent_item_id,
+                           MAX(opened_utc) AS range_last_seen_utc,
+                           COUNT(*) AS range_open_count,
+                           MAX(is_estimated) AS contains_estimated
+                    FROM open_events
+                    WHERE opened_utc >= $rangeStartUtc AND opened_utc < $rangeEndUtc
+                    GROUP BY recent_item_id
+                ) AS range_events ON range_events.recent_item_id = r.id
+                """;
+            lastSeenColumn = "range_events.range_last_seen_utc";
+            openCountColumn = "range_events.range_open_count";
+            estimatedColumn = "range_events.contains_estimated";
+            command.Parameters.AddWithValue("$rangeStartUtc", eventRange.StartUtc.UtcDateTime.ToString("O"));
+            command.Parameters.AddWithValue("$rangeEndUtc", eventRange.EndUtc.UtcDateTime.ToString("O"));
+        }
+
+        var where = conditions.Count == 0 ? string.Empty : $"WHERE {string.Join(" AND ", conditions)}";
+        command.CommandText = $"""
+            SELECT r.id, r.target_path, r.display_name, r.extension, r.item_kind, r.source_link_path,
+                   r.first_seen_utc, {lastSeenColumn}, {openCountColumn}, r.exists_flag,
+                   {estimatedColumn}
+            FROM recent_items AS r
+            {eventJoin}
+            {where}
+            ORDER BY {lastSeenColumn} DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+
+        var results = new List<RecentItem>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new RecentItem(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind),
+                reader.GetInt32(8),
+                reader.GetInt32(9) == 1,
+                reader.GetInt32(10) == 1));
+        }
+
+        return results;
+    }
+
+    private static async Task<HistoryStats> GetStatsCoreAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT unique_items, total_open_count FROM history_stats WHERE id = 1;";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return new HistoryStats(reader.GetInt64(0), reader.GetInt64(1));
+    }
+
     private static SqliteCommand CreateUpsertCommand(SqliteConnection connection,
         SqliteTransaction? transaction = null)
     {
@@ -354,6 +522,39 @@ public sealed class RecentDatabase : IDisposable
         command.Parameters.Add("$exists", SqliteType.Integer);
         command.Prepare();
         return command;
+    }
+
+    private static SqliteCommand CreateOpenEventCommand(
+        SqliteConnection connection,
+        SqliteTransaction transaction)
+    {
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT INTO open_events (
+                recent_item_id, opened_utc, source_link_path, is_estimated)
+            VALUES ($itemId, $openedUtc, $sourceLinkPath, 0)
+            ON CONFLICT(recent_item_id, opened_utc) DO UPDATE SET
+                source_link_path = excluded.source_link_path,
+                is_estimated = 0;
+            """;
+        command.Parameters.Add("$itemId", SqliteType.Integer);
+        command.Parameters.Add("$openedUtc", SqliteType.Text);
+        command.Parameters.Add("$sourceLinkPath", SqliteType.Text);
+        command.Prepare();
+        return command;
+    }
+
+    private static async Task InsertOpenEventAsync(
+        SqliteCommand command,
+        long itemId,
+        RecentItemCandidate item,
+        CancellationToken cancellationToken)
+    {
+        command.Parameters["$itemId"].Value = itemId;
+        command.Parameters["$openedUtc"].Value = item.LinkWriteTime.UtcDateTime.ToString("O");
+        command.Parameters["$sourceLinkPath"].Value = item.SourceLinkPath;
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static void BindUpsertParameters(SqliteCommand command, RecentItemCandidate item)
@@ -441,7 +642,8 @@ public sealed class RecentDatabase : IDisposable
 
     private static string? BuildFtsQuery(IReadOnlyCollection<string> tokens)
     {
-        if (tokens.Count == 0 || tokens.Any(token => token.Length < 3))
+        if (tokens.Count == 0 || tokens.Any(token =>
+                token.Length < 3 || token.Contains('*') || token.Contains('?')))
         {
             return null;
         }
@@ -450,8 +652,62 @@ public sealed class RecentDatabase : IDisposable
             $"\"{token.Replace("\"", "\"\"", StringComparison.Ordinal)}\""));
     }
 
-    private static string EscapeLike(string value) => value
-        .Replace("\\", "\\\\", StringComparison.Ordinal)
-        .Replace("%", "\\%", StringComparison.Ordinal)
-        .Replace("_", "\\_", StringComparison.Ordinal);
+    private static string BuildLikePattern(string token)
+    {
+        var usesWildcard = token.Contains('*') || token.Contains('?');
+        var pattern = new StringBuilder(token.Length + 2);
+        if (!usesWildcard)
+        {
+            pattern.Append('%');
+        }
+
+        foreach (var character in token)
+        {
+            switch (character)
+            {
+                case '\\':
+                    pattern.Append("\\\\");
+                    break;
+                case '%':
+                    pattern.Append("\\%");
+                    break;
+                case '_':
+                    pattern.Append("\\_");
+                    break;
+                case '*' when usesWildcard:
+                    pattern.Append('%');
+                    break;
+                case '?' when usesWildcard:
+                    pattern.Append('_');
+                    break;
+                default:
+                    pattern.Append(character);
+                    break;
+            }
+        }
+
+        if (!usesWildcard)
+        {
+            pattern.Append('%');
+        }
+        return pattern.ToString();
+    }
+
+    private static bool TryGetExactExtensionPattern(string token, out string extension)
+    {
+        extension = string.Empty;
+        if (!token.StartsWith("*.", StringComparison.Ordinal) || token.Length <= 2)
+        {
+            return false;
+        }
+
+        var candidate = token[2..];
+        if (candidate.Any(character => character is '*' or '?' or '.' or '\\' or '/'))
+        {
+            return false;
+        }
+
+        extension = candidate;
+        return true;
+    }
 }

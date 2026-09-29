@@ -11,8 +11,10 @@ public partial class App : System.Windows.Application
 {
     private RecentDatabase? _database;
     private RecentItemsMonitor? _monitor;
+    private MainViewModel? _viewModel;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
+    private System.Drawing.Icon? _trayApplicationIcon;
     private Mutex? _singleInstanceMutex;
     private bool _isExiting;
 
@@ -26,7 +28,7 @@ public partial class App : System.Windows.Application
         {
             _singleInstanceMutex.Dispose();
             _singleInstanceMutex = null;
-            ExitApplication();
+            await ExitApplicationAsync();
             return;
         }
 
@@ -42,8 +44,8 @@ public partial class App : System.Windows.Application
             await _database.InitializeAsync();
 
             _monitor = new RecentItemsMonitor(_database, new ShortcutResolver());
-            var viewModel = new MainViewModel(_database, _monitor, new AutoStartService(), settings);
-            _window = new MainWindow(viewModel);
+            _viewModel = new MainViewModel(_database, _monitor, new AutoStartService(), settings);
+            _window = new MainWindow(_viewModel);
             _window.Closing += OnWindowClosing;
 
             CreateTrayIcon();
@@ -64,17 +66,17 @@ public partial class App : System.Windows.Application
                 ShowWindow();
             }
 
-            await viewModel.InitializeAsync();
+            await _viewModel.InitializeAsync();
 
             if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
             {
-                var settingsWindow = new StorageSettingsWindow(viewModel);
+                var settingsWindow = new StorageSettingsWindow(_viewModel);
                 settingsWindow.Show();
                 settingsWindow.UpdateLayout();
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 SaveScreenshot(settingsWindow, e.Args[settingsScreenshotIndex + 1]);
                 settingsWindow.Close();
-                ExitApplication();
+                await ExitApplicationAsync();
             }
             else if (screenshotIndex >= 0 && screenshotIndex + 1 < e.Args.Length)
             {
@@ -82,14 +84,14 @@ public partial class App : System.Windows.Application
                 _window.UpdateLayout();
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 SaveScreenshot(_window, e.Args[screenshotIndex + 1]);
-                ExitApplication();
+                await ExitApplicationAsync();
             }
         }
         catch (Exception ex)
         {
             System.Windows.MessageBox.Show($"FindHistory를 시작하지 못했습니다.\n\n{ex.Message}", "FindHistory",
                 MessageBoxButton.OK, MessageBoxImage.Error);
-            ExitApplication();
+            await ExitApplicationAsync();
         }
     }
 
@@ -112,16 +114,36 @@ public partial class App : System.Windows.Application
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("FindHistory 열기", null, (_, _) => ShowWindow());
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("종료", null, (_, _) => ExitApplication());
+        menu.Items.Add("종료", null, (_, _) => _ = ExitApplicationAsync());
 
+        _trayApplicationIcon = LoadTrayIcon();
         _trayIcon = new Forms.NotifyIcon
         {
             Text = "FindHistory - 최근 항목 기록 중",
-            Icon = System.Drawing.SystemIcons.Information,
+            Icon = _trayApplicationIcon,
             Visible = true,
             ContextMenuStrip = menu
         };
         _trayIcon.DoubleClick += (_, _) => ShowWindow();
+    }
+
+    private static System.Drawing.Icon LoadTrayIcon()
+    {
+        try
+        {
+            var resource = GetResourceStream(new Uri("pack://application:,,,/Assets/findhistory.ico"));
+            if (resource is not null)
+            {
+                using var icon = new System.Drawing.Icon(resource.Stream);
+                return (System.Drawing.Icon)icon.Clone();
+            }
+        }
+        catch (Exception)
+        {
+            // 아이콘 리소스가 손상되어도 앱 기록 기능은 계속 시작한다.
+        }
+
+        return (System.Drawing.Icon)System.Drawing.SystemIcons.Application.Clone();
     }
 
     private void ShowWindow()
@@ -150,15 +172,28 @@ public partial class App : System.Windows.Application
         _window?.Hide();
     }
 
-    private void ExitApplication()
+    private async Task ExitApplicationAsync()
     {
+        if (_isExiting)
+        {
+            return;
+        }
+
         _isExiting = true;
-        _monitor?.Dispose();
+        _viewModel?.Dispose();
+        _viewModel = null;
+        if (_monitor is not null)
+        {
+            await _monitor.DisposeAsync();
+            _monitor = null;
+        }
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+        _trayApplicationIcon?.Dispose();
+        _trayApplicationIcon = null;
         _window?.Close();
         _database?.Dispose();
         _database = null;

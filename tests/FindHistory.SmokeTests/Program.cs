@@ -7,7 +7,7 @@ Directory.CreateDirectory(testRoot);
 try
 {
     var originalPath = Path.Combine(testRoot, "original", "findhistory.db");
-    var database = new RecentDatabase(originalPath);
+    using var database = new RecentDatabase(originalPath);
     await database.InitializeAsync();
     await database.UpsertAsync(new RecentItemCandidate(
         Path.Combine(testRoot, "sample.txt"),
@@ -38,8 +38,29 @@ try
     Assert((await database.SearchAsync("_b", null)).Count == 0,
         "LIKE 와일드카드 문자가 이스케이프되지 않았습니다.");
 
+    await database.UpsertAsync(new RecentItemCandidate(
+        Path.Combine(testRoot, "videos", "clip_2026.mp4"),
+        "clip_2026.mp4",
+        "MP4",
+        "파일",
+        Path.Combine(testRoot, "video.lnk"),
+        DateTimeOffset.UtcNow,
+        false));
+    Assert((await database.SearchAsync("*.mp4", null)).Count == 1,
+        "별표 확장자 와일드카드 검색이 동작하지 않습니다.");
+    Assert((await database.SearchAsync("*.MP4", null)).Count == 1,
+        "확장자 와일드카드 검색이 대소문자를 구분하고 있습니다.");
+    Assert((await database.SearchAsync("clip_20??.mp4", null)).Count == 1,
+        "물음표 한 글자 와일드카드 검색이 동작하지 않습니다.");
+    Assert((await database.SearchAsync("*.avi", null)).Count == 0,
+        "와일드카드 확장자 검색이 다른 확장자를 반환했습니다.");
+
     Assert((await database.SearchAsync(string.Empty, DateTimeOffset.UtcNow.AddDays(1))).Count == 0,
         "미래 기간 필터가 결과를 반환했습니다.");
+
+    var snapshot = await database.SearchWithStatsAsync("sample", null);
+    Assert(snapshot.Items.Count == 1 && snapshot.Stats.UniqueItems == 3,
+        "검색 결과와 통계를 한 번에 읽지 못했습니다.");
 
     var batch = Enumerable.Range(0, 25)
         .Select(index => new RecentItemCandidate(
@@ -62,6 +83,46 @@ try
         Path.Combine(testRoot, "stable.lnk"), DateTimeOffset.UtcNow.AddSeconds(1), false));
     Assert((await database.SearchAsync("updated_label", null)).Count == 1,
         "수정된 항목이 FTS 인덱스에 반영되지 않았습니다.");
+    var updatedStats = await database.GetStatsAsync();
+    Assert(updatedStats.UniqueItems == 29 && updatedStats.TotalOpenCount == 30,
+        "누적 통계 트리거가 추가/갱신 횟수를 정확히 반영하지 못했습니다.");
+
+    var eventTarget = Path.Combine(testRoot, "timeline", "daily-notes.md");
+    var firstDay = new DateTimeOffset(2026, 9, 20, 10, 0, 0, TimeSpan.Zero);
+    var secondDayMorning = new DateTimeOffset(2026, 9, 21, 9, 0, 0, TimeSpan.Zero);
+    var secondDayEvening = new DateTimeOffset(2026, 9, 21, 18, 30, 0, TimeSpan.Zero);
+    foreach (var openedAt in new[] { firstDay, secondDayMorning, secondDayEvening, secondDayEvening })
+    {
+        await database.UpsertAsync(new RecentItemCandidate(
+            eventTarget,
+            "daily-notes.md",
+            "MD",
+            "파일",
+            Path.Combine(testRoot, "daily-notes.lnk"),
+            openedAt,
+            false));
+    }
+
+    var secondDayRange = new HistoryDateRange(
+        new DateTimeOffset(2026, 9, 21, 0, 0, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 9, 22, 0, 0, 0, TimeSpan.Zero),
+        "2026-09-21");
+    var secondDaySnapshot = await database.SearchWithStatsAsync("daily-notes", secondDayRange);
+    Assert(secondDaySnapshot.Items.Count == 1,
+        "특정 날짜에 연 파일을 찾지 못했습니다.");
+    Assert(secondDaySnapshot.Items[0].OpenCount == 2,
+        "같은 날짜의 중복 감시 이벤트를 제거하거나 열기 횟수를 집계하지 못했습니다.");
+    Assert(secondDaySnapshot.Items[0].LastSeen == secondDayEvening,
+        "특정 날짜 안의 마지막 열기 시각이 정확하지 않습니다.");
+    Assert(!secondDaySnapshot.Items[0].IsEstimatedHistory,
+        "새로 수집한 날짜 기록이 추정 기록으로 표시되었습니다.");
+
+    var emptyDayRange = new HistoryDateRange(
+        new DateTimeOffset(2026, 9, 22, 0, 0, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 9, 23, 0, 0, 0, TimeSpan.Zero),
+        "2026-09-22");
+    Assert((await database.SearchWithStatsAsync("daily-notes", emptyDayRange)).Items.Count == 0,
+        "열지 않은 날짜에 파일이 반환되었습니다.");
 
     var movedPath = Path.Combine(testRoot, "moved", "findhistory.db");
     await database.MoveToAsync(movedPath);
@@ -72,7 +133,7 @@ try
     Assert(movedResults.Count == 1, "이동한 DB에서 기존 기록을 읽지 못했습니다.");
 
     var otherPath = Path.Combine(testRoot, "other", "findhistory.db");
-    var otherDatabase = new RecentDatabase(otherPath);
+    using var otherDatabase = new RecentDatabase(otherPath);
     await otherDatabase.InitializeAsync();
     await otherDatabase.UpsertAsync(new RecentItemCandidate(
         Path.Combine(testRoot, "other.pdf"),
@@ -87,6 +148,80 @@ try
     var switchedResults = await database.SearchAsync("other", null);
     Assert(switchedResults.Count == 1, "기존 DB로 전환하지 못했습니다.");
 
+    var invalidPath = Path.Combine(testRoot, "invalid.db");
+    await File.WriteAllTextAsync(invalidPath, "not a sqlite database");
+    await AssertThrowsAsync(() => database.UseAsync(invalidPath),
+        "잘못된 DB 선택이 실패하지 않았습니다.");
+    Assert(string.Equals(database.DatabasePath, otherPath, StringComparison.OrdinalIgnoreCase),
+        "잘못된 DB 선택 뒤 현재 DB 경로가 바뀌었습니다.");
+    Assert((await database.SearchAsync("other", null)).Count == 1,
+        "잘못된 DB 선택 뒤 기존 DB 연결이 손상되었습니다.");
+
+    var legacyPath = Path.Combine(testRoot, "legacy", "findhistory.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
+    var legacyOpenedAt = new DateTimeOffset(2026, 8, 15, 12, 0, 0, TimeSpan.Zero);
+    await using (var legacyConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+                     $"Data Source={legacyPath};Pooling=False"))
+    {
+        await legacyConnection.OpenAsync();
+        await using var legacyCommand = legacyConnection.CreateCommand();
+        legacyCommand.CommandText = """
+            CREATE TABLE recent_items (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_path         TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                display_name        TEXT NOT NULL,
+                extension           TEXT NOT NULL,
+                item_kind           TEXT NOT NULL,
+                source_link_path    TEXT NOT NULL,
+                first_seen_utc      TEXT NOT NULL,
+                last_seen_utc       TEXT NOT NULL,
+                last_link_write_utc TEXT NOT NULL,
+                open_count          INTEGER NOT NULL DEFAULT 1,
+                exists_flag         INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO recent_items (
+                target_path, display_name, extension, item_kind, source_link_path,
+                first_seen_utc, last_seen_utc, last_link_write_utc, open_count, exists_flag)
+            VALUES ($path, 'legacy.txt', 'TXT', '파일', $link, $opened, $opened, $opened, 4, 0);
+            """;
+        legacyCommand.Parameters.AddWithValue("$path", Path.Combine(testRoot, "legacy.txt"));
+        legacyCommand.Parameters.AddWithValue("$link", Path.Combine(testRoot, "legacy.lnk"));
+        legacyCommand.Parameters.AddWithValue("$opened", legacyOpenedAt.UtcDateTime.ToString("O"));
+        await legacyCommand.ExecuteNonQueryAsync();
+    }
+
+    using (var legacyDatabase = new RecentDatabase(legacyPath))
+    {
+        await legacyDatabase.InitializeAsync();
+        await legacyDatabase.InitializeAsync();
+        var legacyRange = new HistoryDateRange(
+            legacyOpenedAt.AddHours(-1), legacyOpenedAt.AddHours(1), "기존 기록");
+        var legacySnapshot = await legacyDatabase.SearchWithStatsAsync("legacy", legacyRange);
+        Assert(legacySnapshot.Items.Count == 1 && legacySnapshot.Items[0].OpenCount == 1,
+            "기존 DB의 마지막 기록을 날짜 이벤트로 이관하지 못했거나 중복 이관했습니다.");
+        Assert(legacySnapshot.Items[0].IsEstimatedHistory,
+            "기존 DB에서 복원한 날짜가 추정 기록으로 표시되지 않았습니다.");
+    }
+
+    var recentFolder = Path.Combine(testRoot, "recent-folder");
+    Directory.CreateDirectory(recentFolder);
+    await File.WriteAllTextAsync(Path.Combine(recentFolder, "initial-shortcut.url"),
+        "[InternetShortcut]\nURL=https://example.com/initial\n");
+    using var monitorDatabase = new RecentDatabase(Path.Combine(testRoot, "monitor", "findhistory.db"));
+    await monitorDatabase.InitializeAsync();
+    await using (var monitor = new RecentItemsMonitor(monitorDatabase, new ShortcutResolver(), recentFolder))
+    {
+        await monitor.StartAsync();
+        Assert((await monitorDatabase.SearchAsync("initial-shortcut", null)).Count == 1,
+            "감시 시작 시 기존 바로가기를 수집하지 못했습니다.");
+
+        await File.WriteAllTextAsync(Path.Combine(recentFolder, "live-shortcut.url"),
+            "[InternetShortcut]\nURL=https://example.com/live\n");
+        await WaitUntilAsync(
+            async () => (await monitorDatabase.SearchAsync("live-shortcut", null)).Count == 1,
+            TimeSpan.FromSeconds(5));
+    }
+
     var settingsPath = Path.Combine(testRoot, "settings.json");
     var settings = new AppSettingsService(settingsPath);
     settings.SetDatabasePath(movedPath);
@@ -94,7 +229,7 @@ try
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
 
-    Console.WriteLine("PASS: 저장, 검색, DB 이동, 기존 DB 전환, 설정 유지");
+    Console.WriteLine("PASS: 저장, 검색, 날짜별 이벤트, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }
 finally
 {
@@ -106,5 +241,35 @@ static void Assert(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+static async Task AssertThrowsAsync(Func<Task> action, string message)
+{
+    try
+    {
+        await action();
+    }
+    catch (Exception)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException(message);
+}
+
+static async Task WaitUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
+{
+    using var cancellation = new CancellationTokenSource(timeout);
+    while (!await condition())
+    {
+        try
+        {
+            await Task.Delay(50, cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException("실시간 최근 항목 감시 결과를 제한 시간 안에 확인하지 못했습니다.");
+        }
     }
 }
