@@ -143,6 +143,13 @@
                             ToolTip="선택한 폴더와 하위 폴더의 기록을 검색합니다" />
                     <Button Content="필터 초기화" Margin="10,0,0,0" Style="{StaticResource QuietButton}"
                             Command="{Binding ClearFiltersCommand}" />
+                    <ComboBox Width="190" Margin="10,0,0,0" MinHeight="36"
+                              ItemsSource="{Binding SavedSearches}"
+                              SelectedItem="{Binding SelectedSavedSearch, Mode=TwoWay}"
+                              ToolTip="저장한 검색 조건을 불러옵니다" />
+                    <Button Content="검색 저장" Margin="8,0,0,0" Command="{Binding SaveSearchCommand}" />
+                    <Button Content="선택 삭제" Margin="6,0,0,0" Style="{StaticResource QuietButton}"
+                            Command="{Binding RemoveSavedSearchCommand}" />
                 </WrapPanel>
                 <ItemsControl ItemsSource="{Binding FilterChips}" Margin="0,4,0,0">
                     <ItemsControl.ItemsPanel>

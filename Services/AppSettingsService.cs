@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FindHistory.Models;
 
 namespace FindHistory.Services;
 
@@ -21,6 +22,34 @@ public sealed class AppSettingsService
     {
         var fullPath = Path.GetFullPath(databasePath);
         _settings = _settings with { DatabasePath = fullPath };
+        Save(_settings);
+    }
+
+    public IReadOnlyList<SavedSearch> SavedSearches => _settings.SavedSearches;
+
+    public bool AddSavedSearch(SavedSearch savedSearch)
+    {
+        var searches = _settings.SavedSearches.ToList();
+        if (searches.Count >= 30)
+        {
+            return false;
+        }
+
+        searches.Add(savedSearch);
+        _settings = _settings with { SavedSearches = searches };
+        Save(_settings);
+        return true;
+    }
+
+    public void RemoveSavedSearch(Guid id)
+    {
+        var searches = _settings.SavedSearches.Where(search => search.Id != id).ToList();
+        if (searches.Count == _settings.SavedSearches.Count)
+        {
+            return;
+        }
+
+        _settings = _settings with { SavedSearches = searches };
         Save(_settings);
     }
 
@@ -55,5 +84,8 @@ public sealed class AppSettingsService
         File.Move(temporaryPath, _settingsPath, overwrite: true);
     }
 
-    private sealed record AppSettings(string? DatabasePath);
+    private sealed record AppSettings(string? DatabasePath)
+    {
+        public List<SavedSearch> SavedSearches { get; init; } = [];
+    }
 }

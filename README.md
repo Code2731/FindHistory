@@ -35,6 +35,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 파일명과 전체 경로 검색, 여러 검색어 조합, `*`/`?` 와일드카드 지원
 - 전체 기간 / 오늘 / 최근 7일 / 최근 30일 / 최근 1년 / 날짜 지정 필터
 - 확장자·저장된 존재 상태·폴더(하위 폴더 포함)를 날짜·검색어와 AND 조건으로 조합하고 필터 칩으로 개별 해제
+- 검색어와 필터 조합을 최대 30개까지 이름을 붙여 로컬에 저장하고 다시 불러오기
 - 파일 열기 및 파일 탐색기에서 위치 열기
 - 현재 DB를 다른 폴더로 이동하거나 기존 `findhistory.db` 선택
 - 창을 닫은 뒤에도 시스템 트레이에서 백그라운드 기록
@@ -122,6 +123,8 @@ dotnet publish -c Release --self-contained false -o publish
 
 메인 화면의 **데이터 저장소**에서 기록을 유지한 채 DB를 다른 폴더로 옮기거나, 다른 위치의 기존 `findhistory.db`를 선택할 수 있습니다. DB는 실행 파일과 별도로 유지되므로 앱을 업데이트하거나 게시 폴더를 교체해도 기록이 남습니다.
 
+검색 조건을 설정한 뒤 **검색 저장**을 눌러 이름을 지정하면 로컬 설정에 저장됩니다. 저장 검색 목록에서 조건을 다시 적용하거나 선택 삭제할 수 있습니다. 최근 7일 같은 상대 기간은 불러온 시점을 기준으로 계산하고, 날짜 지정 검색은 저장 당시 선택 날짜를 유지합니다.
+
 SQLite DB는 로컬 드라이브 또는 외장 드라이브에 두는 것을 권장합니다. OneDrive 같은 실시간 동기화 폴더는 여러 장치나 프로세스가 동시에 DB에 접근할 때 충돌할 수 있습니다.
 
 FindHistory가 읽는 범위는 Windows의 다음 최근 항목 폴더입니다.
@@ -144,6 +147,12 @@ dotnet run --project tests\FindHistory.SmokeTests -c Release
 
 ```powershell
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
+```
+
+초기 10,000건 배치 쓰기 중 검색 대기 시간을 따로 측정하려면:
+
+```powershell
+dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --contention-only
 ```
 
 현재 최적화된 기준 구현은 10만 건 DB에서 최신 1,000건 조회 약 **4.21 ms**, `*.pdf` 1,000건 조회 약 **6.10 ms**, 최근 7일 이벤트 1,000건 조회 약 **13.42 ms**를 기록했습니다. 수치는 개발 환경에 따라 달라지며, 측정 방법과 100만 건 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 정리되어 있습니다.
@@ -179,6 +188,7 @@ Your history is not sent to an external server. It remains in the database file 
 - Searches file names and full paths with multiple terms and `*`/`?` wildcards
 - All time / Today / Last 7 days / Last 30 days / Last year / Specific date filters
 - Combines extension, last recorded existence, and folder (including descendants) with date and search terms; removable chips show active filters
+- Saves up to 30 named search combinations locally and restores them later
 - Opens a file or reveals its location in File Explorer
 - Moves the current database or switches to an existing `findhistory.db`
 - Keeps recording in the system tray after the window is closed
@@ -265,6 +275,8 @@ Diagnostic log location:
 Diagnostic logs remain local and files older than 14 days are removed at application startup. Error messages may contain a local path that was being accessed, so review the content before sharing it.
 
 Use **Data storage** on the main screen to move the database without losing existing history, or select an existing `findhistory.db` elsewhere. The database is kept separately from the executable, so replacing or updating the publish directory does not remove your history.
+
+Set the desired conditions and choose **Save Search** to name and store them in local settings. Select a saved search to apply it again or delete the selected entry. Relative periods such as Last 7 days are recalculated when applied; a specific date keeps the date selected when it was saved.
 
 A local or external drive is recommended. Real-time synchronization folders such as OneDrive may cause conflicts if multiple devices or processes access the SQLite database concurrently.
 

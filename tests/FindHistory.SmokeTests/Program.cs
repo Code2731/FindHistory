@@ -405,9 +405,18 @@ try
     var settingsPath = Path.Combine(testRoot, "settings.json");
     var settings = new AppSettingsService(settingsPath);
     settings.SetDatabasePath(movedPath);
+    var savedSearch = new SavedSearch(Guid.NewGuid(), "MP4 영상", "*.mp4", "mp4", null,
+        Path.Combine(testRoot, "videos"), 7, null, false);
+    Assert(settings.AddSavedSearch(savedSearch), "저장 검색을 추가하지 못했습니다.");
     var reloadedSettings = new AppSettingsService(settingsPath);
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
+    Assert(reloadedSettings.SavedSearches.Count == 1 &&
+           reloadedSettings.SavedSearches[0] == savedSearch,
+        "저장 검색이 설정 파일에서 원래 조건대로 복원되지 않았습니다.");
+    reloadedSettings.RemoveSavedSearch(savedSearch.Id);
+    Assert(new AppSettingsService(settingsPath).SavedSearches.Count == 0,
+        "저장 검색 삭제가 설정 파일에 반영되지 않았습니다.");
 
     Console.WriteLine("PASS: 로그, 저장, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }

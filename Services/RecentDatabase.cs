@@ -60,6 +60,8 @@ public sealed class RecentDatabase : IDisposable
         _databaseGate.Dispose();
     }
 
+    // Connection pooling stays disabled so MoveToAsync can checkpoint, close every handle,
+    // and move the SQLite file without pooled native connections retaining it.
     private static string BuildConnectionString(string databasePath) =>
         new SqliteConnectionStringBuilder
         {

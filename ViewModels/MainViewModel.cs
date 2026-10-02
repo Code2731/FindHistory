@@ -40,6 +40,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private string _extensionFilter = string.Empty;
     private string _folderFilter = string.Empty;
     private ExistenceOption _selectedExistence;
+    private IReadOnlyList<SavedSearch> _savedSearches;
+    private SavedSearch? _selectedSavedSearch;
+    private bool _isApplyingSavedSearch;
 
     public IReadOnlyList<ExistenceOption> ExistenceOptions { get; } =
     [new("전체 상태", null), new("존재함 (저장된 상태)", true), new("찾을 수 없음", false)];
@@ -47,19 +50,63 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string ExtensionFilter
     {
         get => _extensionFilter;
-        set { if (SetField(ref _extensionFilter, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+        set { if (SetField(ref _extensionFilter, value)) { ClearSavedSearchSelection(); OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
     }
 
     public string FolderFilter
     {
         get => _folderFilter;
-        private set { if (SetField(ref _folderFilter, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+        private set { if (SetField(ref _folderFilter, value)) { ClearSavedSearchSelection(); OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
     }
 
     public ExistenceOption SelectedExistence
     {
         get => _selectedExistence;
-        set { if (value is not null && SetField(ref _selectedExistence, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+        set { if (value is not null && SetField(ref _selectedExistence, value)) { ClearSavedSearchSelection(); OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+    }
+
+    public IReadOnlyList<SavedSearch> SavedSearches
+    {
+        get => _savedSearches;
+        private set => SetField(ref _savedSearches, value);
+    }
+
+    public SavedSearch? SelectedSavedSearch
+    {
+        get => _selectedSavedSearch;
+        set
+        {
+            if (value is null)
+            {
+                if (SetField(ref _selectedSavedSearch, null)) RemoveSavedSearchCommand.RaiseCanExecuteChanged();
+                return;
+            }
+            if (!SetField(ref _selectedSavedSearch, value)) return;
+            RemoveSavedSearchCommand.RaiseCanExecuteChanged();
+            _isApplyingSavedSearch = true;
+            try
+            {
+                SearchText = value.SearchText;
+                ExtensionFilter = value.Extension;
+                SelectedExistence = ExistenceOptions.First(option => option.Exists == value.Exists);
+                FolderFilter = value.Folder;
+                if (value.IsSpecificDate)
+                {
+                    SpecificDate = value.SpecificDate ?? DateTime.Today;
+                    SelectedDateRange = DateRanges.First(option => option.IsSpecificDate);
+                }
+                else
+                {
+                    SelectedDateRange = value.CalendarDayCount is null
+                        ? DateRanges[0]
+                        : DateRanges.First(option => option.CalendarDayCount == value.CalendarDayCount);
+                }
+            }
+            finally
+            {
+                _isApplyingSavedSearch = false;
+            }
+        }
     }
 
     public IReadOnlyList<FilterChip> FilterChips
@@ -78,6 +125,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public RelayCommand ChooseFolderCommand { get; }
     public RelayCommand<FilterChip> RemoveFilterCommand { get; }
     public RelayCommand ClearFiltersCommand { get; }
+    public RelayCommand SaveSearchCommand { get; }
+    public RelayCommand RemoveSavedSearchCommand { get; }
 
     private void ChooseFolder()
     {
@@ -88,6 +137,59 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             SelectedPath = FolderFilter
         };
         if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK) FolderFilter = dialog.SelectedPath;
+    }
+
+    private void SaveCurrentSearch()
+    {
+        var dialog = new SaveSearchDialog { Owner = System.Windows.Application.Current.MainWindow };
+        if (dialog.ShowDialog() != true) return;
+
+        var savedSearch = new SavedSearch(
+            Guid.NewGuid(), dialog.SearchName, SearchText, ExtensionFilter, SelectedExistence.Exists,
+            FolderFilter, SelectedDateRange.IsSpecificDate ? null : SelectedDateRange.CalendarDayCount,
+            SelectedDateRange.IsSpecificDate ? SpecificDate : null, SelectedDateRange.IsSpecificDate);
+        try
+        {
+            if (!_settings.AddSavedSearch(savedSearch))
+            {
+                StatusText = "저장 검색은 최대 30개까지 보관할 수 있습니다.";
+                return;
+            }
+
+            SavedSearches = _settings.SavedSearches.ToArray();
+            SelectedSavedSearch = savedSearch;
+            StatusText = $"'{savedSearch.Name}' 검색을 저장했습니다.";
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Saving a search preset failed.", ex);
+            StatusText = $"검색 저장 실패: {ex.Message}";
+        }
+    }
+
+    private void RemoveSelectedSavedSearch()
+    {
+        if (SelectedSavedSearch is not { } selected) return;
+        try
+        {
+            _settings.RemoveSavedSearch(selected.Id);
+            SavedSearches = _settings.SavedSearches.ToArray();
+            SelectedSavedSearch = null;
+            StatusText = $"'{selected.Name}' 저장 검색을 삭제했습니다.";
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Removing a saved search failed.", ex);
+            StatusText = $"저장 검색 삭제 실패: {ex.Message}";
+        }
+    }
+
+    private void ClearSavedSearchSelection()
+    {
+        if (!_isApplyingSavedSearch && SelectedSavedSearch is not null)
+        {
+            SelectedSavedSearch = null;
+        }
     }
 
     private void RemoveFilter(FilterChip chip)
@@ -149,6 +251,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _log = log;
         _selectedDateRange = DateRanges[0];
         _selectedExistence = ExistenceOptions[0];
+        _savedSearches = _settings.SavedSearches.ToArray();
         ChooseFolderCommand = new RelayCommand(ChooseFolder);
         RemoveFilterCommand = new RelayCommand<FilterChip>(RemoveFilter);
         ClearFiltersCommand = new RelayCommand(() =>
@@ -158,6 +261,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             SelectedExistence = ExistenceOptions[0];
             SelectedDateRange = DateRanges[0];
         });
+        SaveSearchCommand = new RelayCommand(SaveCurrentSearch);
+        RemoveSavedSearchCommand = new RelayCommand(RemoveSelectedSavedSearch,
+            () => SelectedSavedSearch is not null);
         _autoStartEnabled = TryGetAutoStart(autoStart);
 
         RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
@@ -184,6 +290,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (SetField(ref _searchText, value))
             {
                 ClearSearchCommand.RaiseCanExecuteChanged();
+            ClearSavedSearchSelection();
                 ScheduleReload();
             }
         }
@@ -198,6 +305,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 OnPropertyChanged(nameof(IsSpecificDateSelected));
                 OnPropertyChanged(nameof(FilterChips));
+                ClearSavedSearchSelection();
                 UpdateActivitySelection();
                 ScheduleReload();
             }
@@ -214,6 +322,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             var normalizedDate = (value ?? DateTime.Today).Date;
             if (SetField(ref _specificDate, normalizedDate))
             {
+                ClearSavedSearchSelection();
                 OnPropertyChanged(nameof(FilterChips));
                 UpdateActivitySelection();
                 if (IsSpecificDateSelected)

@@ -4,8 +4,9 @@ using FindHistory.Services;
 using Microsoft.Data.Sqlite;
 
 var recentOnly = args.Any(arg => arg.Equals("--recent-only", StringComparison.OrdinalIgnoreCase));
+var contentionOnly = args.Any(arg => arg.Equals("--contention-only", StringComparison.OrdinalIgnoreCase));
 var countArguments = args.Where(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToArray();
-var counts = recentOnly
+var counts = recentOnly || contentionOnly
     ? []
     : countArguments.Length == 0
     ? new[] { 10_000, 100_000, 1_000_000 }
@@ -19,17 +20,86 @@ Console.WriteLine();
 
 try
 {
-    await MeasureRecentFolderAsync(benchmarkRoot);
-    await MeasureCollectorThroughputAsync(benchmarkRoot);
-
-    foreach (var count in counts)
+    if (contentionOnly)
     {
-        await RunSearchScaleAsync(benchmarkRoot, count);
+        await MeasureDatabaseContentionAsync(benchmarkRoot);
+    }
+    else
+    {
+        await MeasureRecentFolderAsync(benchmarkRoot);
+        await MeasureCollectorThroughputAsync(benchmarkRoot);
+
+        foreach (var count in counts)
+        {
+            await RunSearchScaleAsync(benchmarkRoot, count);
+        }
     }
 }
+
 finally
 {
     Directory.Delete(benchmarkRoot, recursive: true);
+}
+
+static async Task MeasureDatabaseContentionAsync(string root)
+{
+    const int concurrentWriteCount = 10_000;
+    const int iterations = 3;
+    var database = new RecentDatabase(Path.Combine(root, "contention", "findhistory.db"));
+    await database.InitializeAsync();
+    var seed = CreateCandidate(root, -1) with
+    {
+        TargetPath = Path.Combine(root, "anchor", "anchor.txt"),
+        DisplayName = "anchor.txt",
+        SourceLinkPath = Path.Combine(root, "anchor.lnk")
+    };
+    await database.UpsertAsync(seed);
+    await database.SearchAsync("anchor", null); // warm up the read path
+
+    Console.WriteLine($"CONTENTION | serialized DB gate | writes per batch {concurrentWriteCount:N0}");
+    var baseline = new double[7];
+    for (var index = 0; index < baseline.Length; index++)
+    {
+        var timer = Stopwatch.StartNew();
+        await database.SearchAsync("anchor", null);
+        timer.Stop();
+        baseline[index] = timer.Elapsed.TotalMilliseconds;
+    }
+    Array.Sort(baseline);
+    Console.WriteLine($"  idle search median | {baseline[baseline.Length / 2]:N2} ms");
+    var results = new double[iterations];
+    var writeTimes = new double[iterations];
+    for (var iteration = 0; iteration < iterations; iteration++)
+    {
+        var offset = iteration * concurrentWriteCount;
+        var candidates = Enumerable.Range(0, concurrentWriteCount)
+            .Select(index => CreateCandidate(root, offset + index))
+            .ToArray();
+        var writeTimer = Stopwatch.StartNew();
+        var writerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writeTask = Task.Run(async () =>
+        {
+            writerStarted.SetResult();
+            await database.UpsertManyAsync(candidates);
+        });
+        await writerStarted.Task;
+        await Task.Delay(10); // let the worker acquire the DB gate before queuing a search
+        var searchTimer = Stopwatch.StartNew();
+        var readTask = database.SearchAsync("anchor", null);
+        await readTask;
+        searchTimer.Stop();
+        await writeTask;
+        writeTimer.Stop();
+        results[iteration] = searchTimer.Elapsed.TotalMilliseconds;
+        writeTimes[iteration] = writeTimer.Elapsed.TotalMilliseconds;
+    }
+
+    Array.Sort(results);
+    Array.Sort(writeTimes);
+    Console.WriteLine($"  write batch median | {writeTimes[iterations / 2]:N1} ms");
+    Console.WriteLine($"  queued search median | {results[iterations / 2]:N1} ms");
+    Console.WriteLine($"  queued search p95    | {results[^1]:N1} ms");
+    Console.WriteLine("  Search is intentionally queued behind the batch in the current single-gate design.");
 }
 
 static async Task MeasureRecentFolderAsync(string root)
