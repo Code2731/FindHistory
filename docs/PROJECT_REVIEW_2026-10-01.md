@@ -98,3 +98,9 @@ docs/         ROADMAP, PERFORMANCE
 - M1 FTS 트리거 축소 + 회귀 테스트
 - M6 솔루션 + CI 워크플로
 
+## 8. 2026-10-02 진행 기록
+
+- `df972d0` — 히트맵·조합형 필터 및 리뷰 문서를 `codex/activity-heatmap` 원격 브랜치에 보존.
+- DB schema `user_version=1` 도입: 기존 날짜 이벤트 이관과 초기 통계 행 생성을 한 트랜잭션에서 한 번만 실행. 미래 버전 DB는 거부.
+- FTS UPDATE 트리거를 `display_name`/`target_path` 실제 변경 때만 실행하도록 교체.
+- 반복 초기화 후 이벤트 중복·통계 보존 및 기존 트리거 교체 회귀 검증을 추가.

@@ -253,6 +253,31 @@ try
     Assert((await database.SearchAsync("other", null)).Count == 1,
         "잘못된 DB 선택 뒤 기존 DB 연결이 손상되었습니다.");
 
+    var futureSchemaPath = Path.Combine(testRoot, "future-schema.db");
+    await using (var futureConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+                     $"Data Source={futureSchemaPath};Pooling=False"))
+    {
+        await futureConnection.OpenAsync();
+        await using var futureCommand = futureConnection.CreateCommand();
+        futureCommand.CommandText = "PRAGMA user_version = 99;";
+        await futureCommand.ExecuteNonQueryAsync();
+    }
+    using (var futureDatabase = new RecentDatabase(futureSchemaPath))
+    {
+        await AssertThrowsAsync(() => futureDatabase.InitializeAsync(),
+            "지원하지 않는 미래 DB 버전을 초기화해 버렸습니다.");
+    }
+    await using (var futureCheckConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+                     $"Data Source={futureSchemaPath};Pooling=False"))
+    {
+        await futureCheckConnection.OpenAsync();
+        await using var futureCheckCommand = futureCheckConnection.CreateCommand();
+        futureCheckCommand.CommandText =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recent_items';";
+        Assert(Convert.ToInt32(await futureCheckCommand.ExecuteScalarAsync()) == 0,
+            "미래 버전을 거부하기 전에 DB 스키마를 수정했습니다.");
+    }
+
     var legacyPath = Path.Combine(testRoot, "legacy", "findhistory.db");
     Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
     var legacyOpenedAt = new DateTimeOffset(2026, 8, 15, 12, 0, 0, TimeSpan.Zero);
@@ -307,6 +332,25 @@ try
             TimeZoneInfo.Utc);
         Assert(legacyActivity.Count == 1 && legacyActivity[0].ContainsEstimated,
             "이관된 추정 이벤트가 날짜별 활동 집계에 표시되지 않았습니다.");
+        Assert((await legacyDatabase.GetStatsAsync()).TotalOpenCount == 4,
+            "이관 시 저장된 전체 열기 횟수가 보존되지 않았습니다.");
+        Assert((await legacyDatabase.GetDiagnosticsAsync()).EstimatedEvents == 1,
+            "DB를 다시 초기화할 때 추정 이벤트가 중복 생성되었습니다.");
+        await using var schemaConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={legacyPath};Pooling=False");
+        await schemaConnection.OpenAsync();
+        await using var schemaCommand = schemaConnection.CreateCommand();
+        schemaCommand.CommandText = "PRAGMA user_version;";
+        Assert(Convert.ToInt32(await schemaCommand.ExecuteScalarAsync()) == 1,
+            "완료된 스키마 이관 버전이 기록되지 않았습니다.");
+        schemaCommand.CommandText =
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='recent_items_fts_au';";
+        await using var schemaReader = await schemaCommand.ExecuteReaderAsync();
+        Assert(await schemaReader.ReadAsync(), "FTS 갱신 트리거를 찾을 수 없습니다.");
+        var ftsUpdateTrigger = schemaReader.IsDBNull(0) ? string.Empty : schemaReader.GetString(0);
+        Assert(ftsUpdateTrigger.Contains("UPDATE OF display_name, target_path", StringComparison.OrdinalIgnoreCase) &&
+               ftsUpdateTrigger.Contains("WHEN old.display_name <> new.display_name", StringComparison.OrdinalIgnoreCase),
+            "기존 FTS 갱신 트리거가 변경 필드 조건으로 교체되지 않았습니다.");
     }
 
     var recentFolder = Path.Combine(testRoot, "recent-folder");

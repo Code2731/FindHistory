@@ -7,6 +7,7 @@ namespace FindHistory.Services;
 
 public sealed class RecentDatabase : IDisposable
 {
+    private const int CurrentSchemaVersion = 1;
     private string _connectionString;
     private string _databasePath;
     private bool _ftsAvailable;
@@ -86,6 +87,17 @@ public sealed class RecentDatabase : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_databasePath)!);
         await using var connection = await OpenAsync(cancellationToken);
+        await using (var schemaVersionCommand = connection.CreateCommand())
+        {
+            schemaVersionCommand.CommandText = "PRAGMA user_version;";
+            var existingVersion = Convert.ToInt32(
+                await schemaVersionCommand.ExecuteScalarAsync(cancellationToken));
+            if (existingVersion > CurrentSchemaVersion)
+            {
+                throw new InvalidDataException(
+                    $"데이터베이스 스키마 버전 {existingVersion}은 이 앱에서 지원하지 않습니다 (최대 {CurrentSchemaVersion}).");
+            }
+        }
         await using var command = connection.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode = WAL;
@@ -125,19 +137,11 @@ public sealed class RecentDatabase : IDisposable
             CREATE INDEX IF NOT EXISTS ix_open_events_opened_item
                 ON open_events(opened_utc, recent_item_id);
 
-            INSERT OR IGNORE INTO open_events (
-                recent_item_id, opened_utc, source_link_path, is_estimated)
-            SELECT id, last_seen_utc, source_link_path, 1
-            FROM recent_items;
-
             CREATE TABLE IF NOT EXISTS history_stats (
                 id               INTEGER PRIMARY KEY CHECK (id = 1),
                 unique_items     INTEGER NOT NULL,
                 total_open_count INTEGER NOT NULL
             );
-
-            INSERT OR REPLACE INTO history_stats (id, unique_items, total_open_count)
-            SELECT 1, COUNT(*), COALESCE(SUM(open_count), 0) FROM recent_items;
 
             CREATE TRIGGER IF NOT EXISTS recent_items_stats_ai AFTER INSERT ON recent_items BEGIN
                 UPDATE history_stats
@@ -162,7 +166,43 @@ public sealed class RecentDatabase : IDisposable
             END;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await MigrateSchemaAsync(connection, cancellationToken);
         _ftsAvailable = await EnsureSearchIndexAsync(connection, cancellationToken);
+    }
+
+    private static async Task MigrateSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var versionCommand = connection.CreateCommand();
+        versionCommand.CommandText = "PRAGMA user_version;";
+        var version = Convert.ToInt32(await versionCommand.ExecuteScalarAsync(cancellationToken));
+        if (version > CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"데이터베이스 스키마 버전 {version}은 이 앱에서 지원하지 않습니다 (최대 {CurrentSchemaVersion}).");
+        }
+        if (version == CurrentSchemaVersion)
+        {
+            return;
+        }
+
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var migration = connection.CreateCommand();
+        migration.Transaction = (SqliteTransaction)transaction;
+        migration.CommandText = """
+            INSERT OR IGNORE INTO open_events (
+                recent_item_id, opened_utc, source_link_path, is_estimated)
+            SELECT id, last_seen_utc, source_link_path, 1
+            FROM recent_items;
+
+            INSERT OR IGNORE INTO history_stats (id, unique_items, total_open_count)
+            SELECT 1, COUNT(*), COALESCE(SUM(open_count), 0) FROM recent_items;
+
+            PRAGMA user_version = 1;
+            """;
+        await migration.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task UpsertAsync(RecentItemCandidate item, CancellationToken cancellationToken = default)
@@ -703,7 +743,12 @@ public sealed class RecentDatabase : IDisposable
                     VALUES ('delete', old.id, old.display_name, old.target_path);
                 END;
 
-                CREATE TRIGGER IF NOT EXISTS recent_items_fts_au AFTER UPDATE ON recent_items BEGIN
+                DROP TRIGGER IF EXISTS recent_items_fts_au;
+
+                CREATE TRIGGER recent_items_fts_au
+                AFTER UPDATE OF display_name, target_path ON recent_items
+                WHEN old.display_name <> new.display_name OR old.target_path <> new.target_path
+                BEGIN
                     INSERT INTO recent_items_fts(recent_items_fts, rowid, display_name, target_path)
                     VALUES ('delete', old.id, old.display_name, old.target_path);
                     INSERT INTO recent_items_fts(rowid, display_name, target_path)
