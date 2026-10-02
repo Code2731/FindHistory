@@ -100,6 +100,69 @@ static async Task MeasureDatabaseContentionAsync(string root)
     Console.WriteLine($"  queued search median | {results[iterations / 2]:N1} ms");
     Console.WriteLine($"  queued search p95    | {results[^1]:N1} ms");
     Console.WriteLine("  Search is intentionally queued behind the batch in the current single-gate design.");
+
+    foreach (var cacheMode in new[] { SqliteCacheMode.Shared, SqliteCacheMode.Private })
+    {
+        var caseRoot = Path.Combine(root, $"readonly-{cacheMode}");
+        var caseDatabase = new RecentDatabase(Path.Combine(caseRoot, "findhistory.db"));
+        await caseDatabase.InitializeAsync();
+        await caseDatabase.UpsertAsync(seed with { TargetPath = seed.TargetPath + $"-{cacheMode}" });
+        var readConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = caseDatabase.DatabasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = cacheMode,
+            Pooling = false
+        }.ToString();
+        await using var reader = new SqliteConnection(readConnectionString);
+        await reader.OpenAsync();
+        await using (var warmup = reader.CreateCommand())
+        {
+            warmup.CommandText = "SELECT COUNT(*) FROM recent_items WHERE display_name LIKE '%anchor%';";
+            await warmup.ExecuteScalarAsync();
+        }
+
+        var candidates = Enumerable.Range(0, concurrentWriteCount)
+            .Select(index => CreateCandidate(root, 100_000 + index))
+            .ToArray();
+        var writeTimer = Stopwatch.StartNew();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writeTask = Task.Run(async () =>
+        {
+            started.SetResult();
+            await caseDatabase.UpsertManyAsync(candidates);
+        });
+        await started.Task;
+        await Task.Delay(10);
+        var readTimer = Stopwatch.StartNew();
+        string? error = null;
+        var foundAnchor = false;
+        try
+        {
+            await using var command = reader.CreateCommand();
+            command.CommandText = "SELECT display_name FROM recent_items WHERE display_name LIKE '%anchor%' LIMIT 1;";
+            var value = await command.ExecuteScalarAsync();
+            foundAnchor = value is not null;
+        }
+        catch (SqliteException exception)
+        {
+            error = $"SQLite {exception.SqliteErrorCode}/{exception.SqliteExtendedErrorCode}";
+        }
+        readTimer.Stop();
+        string? writeError = null;
+        try
+        {
+            await writeTask;
+        }
+        catch (SqliteException exception)
+        {
+            writeError = $"writer SQLite {exception.SqliteErrorCode}/{exception.SqliteExtendedErrorCode}";
+        }
+        writeTimer.Stop();
+        Console.WriteLine($"  read-only {cacheMode,-7} | {readTimer.Elapsed.TotalMilliseconds,8:N2} ms | " +
+                          $"anchor {foundAnchor} | {(error ?? writeError ?? "ok")} | " +
+                          $"write {writeTimer.Elapsed.TotalMilliseconds:N1} ms");
+    }
 }
 
 static async Task MeasureRecentFolderAsync(string root)
