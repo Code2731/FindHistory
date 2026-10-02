@@ -432,6 +432,119 @@ public sealed class RecentDatabase : IDisposable
         }
     }
 
+    public async Task BackupToAsync(string destinationPath, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var targetPath = Path.GetFullPath(destinationPath);
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("백업 파일은 현재 데이터베이스와 다른 경로여야 합니다.");
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            var temporaryPath = targetPath + $".{Guid.NewGuid():N}.tmp";
+            try
+            {
+                await BackupDatabaseFileAsync(_databasePath, temporaryPath, cancellationToken);
+                File.Move(temporaryPath, targetPath, overwrite: true);
+            }
+            finally
+            {
+                DeleteCheckpointSidecar(temporaryPath);
+                DeleteCheckpointSidecar(temporaryPath + "-wal");
+                DeleteCheckpointSidecar(temporaryPath + "-shm");
+            }
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<string> RestoreFromAsync(string backupPath, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var sourcePath = Path.GetFullPath(backupPath);
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("백업 파일을 찾을 수 없습니다.", sourcePath);
+        }
+
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (string.Equals(sourcePath, _databasePath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("현재 데이터베이스 파일 자체는 복원 원본으로 선택할 수 없습니다.");
+            }
+
+            await ValidateFindHistoryDatabaseAsync(sourcePath, cancellationToken);
+            var directory = Path.GetDirectoryName(_databasePath)!;
+            var stagedPath = Path.Combine(directory, $"findhistory-restore-{Guid.NewGuid():N}.tmp");
+            var safetyPath = _databasePath + $".before-restore-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.bak";
+            try
+            {
+                await BackupDatabaseFileAsync(sourcePath, stagedPath, cancellationToken);
+                await ValidateFindHistoryDatabaseAsync(stagedPath, cancellationToken);
+                await CheckpointAsync(cancellationToken);
+                await BackupDatabaseFileAsync(_databasePath, safetyPath, cancellationToken);
+                File.Move(stagedPath, _databasePath, overwrite: true);
+                DeleteCheckpointSidecar(_databasePath + "-wal");
+                DeleteCheckpointSidecar(_databasePath + "-shm");
+                try
+                {
+                    await InitializeCoreAsync(cancellationToken);
+                }
+                catch
+                {
+                    DeleteCheckpointSidecar(_databasePath + "-wal");
+                    DeleteCheckpointSidecar(_databasePath + "-shm");
+                    File.Copy(safetyPath, _databasePath, overwrite: true);
+                    await InitializeCoreAsync(cancellationToken);
+                    throw;
+                }
+                return safetyPath;
+            }
+            finally
+            {
+                DeleteCheckpointSidecar(stagedPath);
+                DeleteCheckpointSidecar(stagedPath + "-wal");
+                DeleteCheckpointSidecar(stagedPath + "-shm");
+            }
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private static async Task BackupDatabaseFileAsync(
+        string sourcePath, string destinationPath, CancellationToken cancellationToken)
+    {
+        var sourceConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString();
+        var destinationConnectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = destinationPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString();
+        await using var source = new SqliteConnection(sourceConnectionString);
+        await source.OpenAsync(cancellationToken);
+        await using var destination = new SqliteConnection(destinationConnectionString);
+        await destination.OpenAsync(cancellationToken);
+        await Task.Run(() => source.BackupDatabase(destination), cancellationToken);
+    }
+
     public async Task UseAsync(string databasePath, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();

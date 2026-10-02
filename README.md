@@ -123,6 +123,8 @@ dotnet publish -c Release --self-contained false -o publish
 
 메인 화면의 **데이터 저장소**에서 기록을 유지한 채 DB를 다른 폴더로 옮기거나, 다른 위치의 기존 `findhistory.db`를 선택할 수 있습니다. DB는 실행 파일과 별도로 유지되므로 앱을 업데이트하거나 게시 폴더를 교체해도 기록이 남습니다.
 
+같은 화면의 **백업 저장**은 SQLite 온라인 백업으로 일관된 백업 파일을 만듭니다. **백업 복원**은 유효한 FindHistory DB인지 먼저 검사하고, 현재 데이터베이스를 고유한 안전 사본으로 보관한 뒤 선택한 백업으로 복원합니다. 백업은 앱 설정 파일과 별개이므로, 저장된 검색 조건을 함께 보존하려면 `%LocalAppData%\FindHistory\settings.json`도 별도로 복사하세요.
+
 검색 조건을 설정한 뒤 **검색 저장**을 눌러 이름을 지정하면 로컬 설정에 저장됩니다. 저장 검색 목록에서 조건을 다시 적용하거나 선택 삭제할 수 있습니다. 최근 7일 같은 상대 기간은 불러온 시점을 기준으로 계산하고, 날짜 지정 검색은 저장 당시 선택 날짜를 유지합니다.
 
 SQLite DB는 로컬 드라이브 또는 외장 드라이브에 두는 것을 권장합니다. OneDrive 같은 실시간 동기화 폴더는 여러 장치나 프로세스가 동시에 DB에 접근할 때 충돌할 수 있습니다.
@@ -275,6 +277,8 @@ Diagnostic log location:
 Diagnostic logs remain local and files older than 14 days are removed at application startup. Error messages may contain a local path that was being accessed, so review the content before sharing it.
 
 Use **Data storage** on the main screen to move the database without losing existing history, or select an existing `findhistory.db` elsewhere. The database is kept separately from the executable, so replacing or updating the publish directory does not remove your history.
+
+**Save Backup** creates a consistent SQLite online backup. **Restore Backup** validates that the selected file is a FindHistory database, preserves the current database as a uniquely named safety copy, and then restores the selected backup. Backups do not include app settings; copy `%LocalAppData%\FindHistory\settings.json` separately if you also want to preserve saved searches.
 
 Set the desired conditions and choose **Save Search** to name and store them in local settings. Select a saved search to apply it again or delete the selected entry. Relative periods such as Last 7 days are recalculated when applied; a specific date keeps the date selected when it was saved.
 

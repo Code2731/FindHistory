@@ -220,6 +220,37 @@ try
     Assert(databaseDiagnostics.EstimatedEvents == 0,
         "새 데이터베이스 이벤트가 추정 기록으로 집계되었습니다.");
 
+    var preBackupItemCount = (await database.GetStatsAsync()).UniqueItems;
+    var backupPath = Path.Combine(testRoot, "backups", "findhistory.fhbackup");
+    await database.BackupToAsync(backupPath);
+    Assert(File.Exists(backupPath), "SQLite Backup API 백업 파일이 생성되지 않았습니다.");
+    using (var backupDatabase = new RecentDatabase(backupPath))
+    {
+        await backupDatabase.InitializeAsync();
+        Assert((await backupDatabase.GetStatsAsync()).UniqueItems == preBackupItemCount,
+            "백업 파일의 항목 수가 원본과 일치하지 않습니다.");
+    }
+    await database.UpsertAsync(new RecentItemCandidate(
+        Path.Combine(testRoot, "added-after-backup.txt"),
+        "added-after-backup.txt",
+        "TXT",
+        "파일",
+        Path.Combine(testRoot, "added-after-backup.lnk"),
+        DateTimeOffset.UtcNow,
+        false));
+    var safetyCopyPath = await database.RestoreFromAsync(backupPath);
+    Assert(File.Exists(safetyCopyPath), "복원 전 현재 DB의 안전 사본이 생성되지 않았습니다.");
+    Assert((await database.GetStatsAsync()).UniqueItems == preBackupItemCount,
+        "복원 후 DB가 백업 시점의 항목 수로 돌아오지 않았습니다.");
+    Assert((await database.SearchAsync("added-after-backup", null)).Count == 0,
+        "복원 전에 추가한 항목이 백업 복원 후에도 남아 있습니다.");
+    var invalidBackupPath = Path.Combine(testRoot, "invalid-backup.db");
+    await File.WriteAllTextAsync(invalidBackupPath, "not a database");
+    await AssertThrowsAsync(() => database.RestoreFromAsync(invalidBackupPath),
+        "잘못된 백업 복원이 실패하지 않았습니다.");
+    Assert((await database.GetStatsAsync()).UniqueItems == preBackupItemCount,
+        "잘못된 백업 시도가 현재 DB를 변경했습니다.");
+
     var movedPath = Path.Combine(testRoot, "moved", "findhistory.db");
     await database.MoveToAsync(movedPath);
     Assert(File.Exists(movedPath), "DB 파일이 새 위치로 이동되지 않았습니다.");
@@ -418,7 +449,7 @@ try
     Assert(new AppSettingsService(settingsPath).SavedSearches.Count == 0,
         "저장 검색 삭제가 설정 파일에 반영되지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
+    Console.WriteLine("PASS: 로그, 저장/복원, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }
 finally
 {

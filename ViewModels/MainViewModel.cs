@@ -499,6 +499,53 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    public async Task<bool> BackupDatabaseAsync(string destinationPath)
+    {
+        IsBusy = true;
+        StatusText = "데이터베이스를 백업하는 중…";
+        try
+        {
+            await _database.BackupToAsync(destinationPath);
+            StatusText = $"백업을 저장했습니다: {destinationPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Database backup failed.", ex);
+            StatusText = $"백업에 실패했습니다: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public async Task<string?> RestoreDatabaseAsync(string backupPath)
+    {
+        IsBusy = true;
+        StatusText = "백업을 확인하고 복원하는 중…";
+        try
+        {
+            var safetyPath = await _database.RestoreFromAsync(backupPath);
+            await LoadAsync(CancellationToken.None);
+            await LoadActivityAsync(CancellationToken.None);
+            OnPropertyChanged(nameof(DatabaseSizeText));
+            StatusText = $"백업을 복원했습니다. 복원 전 DB 사본: {safetyPath}";
+            return safetyPath;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Database restore failed.", ex);
+            StatusText = $"복원에 실패했습니다: {ex.Message}";
+            return null;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     private static bool TryGetAutoStart(AutoStartService autoStart)
     {
         try
