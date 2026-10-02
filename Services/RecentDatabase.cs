@@ -290,6 +290,27 @@ public sealed class RecentDatabase : IDisposable
         string searchText,
         HistoryDateRange? dateRange,
         int limit = 1000,
+        CancellationToken cancellationToken = default,
+        HistoryFilters? filters = null)
+    {
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            var items = await SearchCoreAsync(connection, searchText, null, dateRange, limit, cancellationToken, filters);
+            var stats = await GetStatsCoreAsync(connection, cancellationToken);
+            return new SearchSnapshot(items, stats);
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<DailyActivity>> GetDailyActivityAsync(
+        HistoryDateRange dateRange,
+        TimeZoneInfo? timeZone = null,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -297,9 +318,37 @@ public sealed class RecentDatabase : IDisposable
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
-            var items = await SearchCoreAsync(connection, searchText, null, dateRange, limit, cancellationToken);
-            var stats = await GetStatsCoreAsync(connection, cancellationToken);
-            return new SearchSnapshot(items, stats);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT opened_utc, is_estimated
+                FROM open_events
+                WHERE opened_utc >= $rangeStartUtc AND opened_utc < $rangeEndUtc
+                ORDER BY opened_utc;
+                """;
+            command.Parameters.AddWithValue(
+                "$rangeStartUtc", dateRange.StartUtc.UtcDateTime.ToString("O"));
+            command.Parameters.AddWithValue(
+                "$rangeEndUtc", dateRange.EndUtc.UtcDateTime.ToString("O"));
+
+            var zone = timeZone ?? TimeZoneInfo.Local;
+            var totals = new Dictionary<DateTime, (int Count, bool ContainsEstimated)>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var openedUtc = DateTimeOffset.Parse(
+                    reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+                var localDate = TimeZoneInfo.ConvertTime(openedUtc, zone).Date;
+                totals.TryGetValue(localDate, out var total);
+                totals[localDate] = (
+                    total.Count + 1,
+                    total.ContainsEstimated || reader.GetInt32(1) == 1);
+            }
+
+            return totals
+                .OrderBy(pair => pair.Key)
+                .Select(pair => new DailyActivity(
+                    pair.Key, pair.Value.Count, pair.Value.ContainsEstimated))
+                .ToArray();
         }
         finally
         {
@@ -434,11 +483,31 @@ public sealed class RecentDatabase : IDisposable
         DateTimeOffset? since,
         HistoryDateRange? eventRange,
         int limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HistoryFilters? filters = null)
     {
         await using var command = connection.CreateCommand();
 
         var conditions = new List<string>();
+        if (!string.IsNullOrWhiteSpace(filters?.Extension))
+        {
+            conditions.Add("r.extension = $extension COLLATE NOCASE");
+            command.Parameters.AddWithValue("$extension", filters.Extension.Trim().TrimStart('*', '.'));
+        }
+        if (filters?.Exists is { } exists)
+        {
+            conditions.Add("r.exists_flag = $exists");
+            command.Parameters.AddWithValue("$exists", exists ? 1 : 0);
+        }
+        if (!string.IsNullOrWhiteSpace(filters?.Folder))
+        {
+            var folder = Path.GetFullPath(filters.Folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            // 디렉터리 구분자까지 포함해 Work와 Work-old를 구분한다. LIKE 메타문자는 리터럴 처리한다.
+            var prefix = folder + Path.DirectorySeparatorChar;
+            var escapedPrefix = prefix.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+            conditions.Add("r.target_path LIKE $folderPrefix ESCAPE '\\'");
+            command.Parameters.AddWithValue("$folderPrefix", escapedPrefix + "%");
+        }
         var tokens = searchText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var ftsQuery = BuildFtsQuery(tokens);
         var useFts = ftsQuery is not null && _ftsAvailable &&

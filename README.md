@@ -31,8 +31,10 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 최근 항목 폴더 실시간 감시 및 파일 감시 오류 시 자동 전체 재검사
 - 동일 파일의 재등장 횟수와 마지막 기록 시각 누적
 - 개별 열기 이벤트를 날짜별로 보존하고 특정 날짜만 조회
+- 최근 16주의 날짜별 활동량을 히트맵으로 확인하고 날짜를 눌러 바로 필터링
 - 파일명과 전체 경로 검색, 여러 검색어 조합, `*`/`?` 와일드카드 지원
 - 전체 기간 / 오늘 / 최근 7일 / 최근 30일 / 최근 1년 / 날짜 지정 필터
+- 확장자·저장된 존재 상태·폴더(하위 폴더 포함)를 날짜·검색어와 AND 조건으로 조합하고 필터 칩으로 개별 해제
 - 파일 열기 및 파일 탐색기에서 위치 열기
 - 현재 DB를 다른 폴더로 이동하거나 기존 `findhistory.db` 선택
 - 창을 닫은 뒤에도 시스템 트레이에서 백그라운드 기록
@@ -58,7 +60,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 
 ### 날짜별 기록
 
-기간 선택에서 **날짜 지정**을 고르면 달력의 특정 날짜에 열었던 파일만 볼 수 있습니다.
+기간 선택에서 **날짜 지정**을 고르면 달력의 특정 날짜에 열었던 파일만 볼 수 있습니다. 메인 화면의 **최근 활동** 히트맵에서 날짜를 누르면 같은 필터가 즉시 적용되며, 색이 진할수록 그날 기록된 열기 횟수가 많다는 뜻입니다.
 
 날짜 기록에는 다음과 같은 Windows 측 한계가 있습니다.
 
@@ -173,8 +175,10 @@ Your history is not sent to an external server. It remains in the database file 
 - Watches the Recent Items directory in real time and automatically rescans after watcher errors
 - Tracks how often an item reappears and when it was last seen
 - Preserves individual open events and filters them by an exact calendar date
+- Shows the last 16 weeks in an activity heatmap and filters by a clicked date
 - Searches file names and full paths with multiple terms and `*`/`?` wildcards
 - All time / Today / Last 7 days / Last 30 days / Last year / Specific date filters
+- Combines extension, last recorded existence, and folder (including descendants) with date and search terms; removable chips show active filters
 - Opens a file or reveals its location in File Explorer
 - Moves the current database or switches to an existing `findhistory.db`
 - Keeps recording in the system tray after the window is closed
@@ -200,7 +204,7 @@ In wildcard expressions, `*` matches zero or more characters and `?` matches exa
 
 ### Date history
 
-Choose **Specific date** in the period selector to show only files opened on a selected calendar date.
+Choose **Specific date** in the period selector to show only files opened on a selected calendar date. You can also click a day in the **Recent activity** heatmap to apply the same filter immediately; darker cells represent more recorded opens.
 
 Date history is subject to limitations in the Windows Recent Items source:
 

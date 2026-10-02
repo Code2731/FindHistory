@@ -18,6 +18,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private readonly AppSettingsService _settings;
     private readonly AppLogService _log;
     private CancellationTokenSource? _searchCancellation;
+    private CancellationTokenSource? _activityCancellation;
     private long _loadSequence;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
@@ -32,12 +33,96 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _initialized;
     private bool _disposed;
     private IReadOnlyList<RecentItem> _items = [];
+    private IReadOnlyList<ActivityWeek> _activityWeeks = [];
+    private string _activityPeriodText = "최근 활동 준비 중";
+    private string _activitySummaryText = string.Empty;
     private double _lastSearchLatencyMilliseconds;
+    private string _extensionFilter = string.Empty;
+    private string _folderFilter = string.Empty;
+    private ExistenceOption _selectedExistence;
+
+    public IReadOnlyList<ExistenceOption> ExistenceOptions { get; } =
+    [new("전체 상태", null), new("존재함 (저장된 상태)", true), new("찾을 수 없음", false)];
+
+    public string ExtensionFilter
+    {
+        get => _extensionFilter;
+        set { if (SetField(ref _extensionFilter, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+    }
+
+    public string FolderFilter
+    {
+        get => _folderFilter;
+        private set { if (SetField(ref _folderFilter, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+    }
+
+    public ExistenceOption SelectedExistence
+    {
+        get => _selectedExistence;
+        set { if (value is not null && SetField(ref _selectedExistence, value)) { OnPropertyChanged(nameof(FilterChips)); ScheduleReload(); } }
+    }
+
+    public IReadOnlyList<FilterChip> FilterChips
+    {
+        get
+        {
+            var chips = new List<FilterChip>();
+            if (!string.IsNullOrWhiteSpace(ExtensionFilter)) chips.Add(new("extension", $"확장자: {ExtensionFilter.Trim()} ×"));
+            if (SelectedExistence.Exists is not null) chips.Add(new("exists", $"상태: {SelectedExistence.Label} ×"));
+            if (FolderFilter.Length > 0) chips.Add(new("folder", $"폴더: {FolderFilter} ×"));
+            if (SelectedDateRange != DateRanges[0]) chips.Add(new("date", $"기간: {BuildSelectedDateRange()?.Label} ×"));
+            return chips;
+        }
+    }
+
+    public RelayCommand ChooseFolderCommand { get; }
+    public RelayCommand<FilterChip> RemoveFilterCommand { get; }
+    public RelayCommand ClearFiltersCommand { get; }
+
+    private void ChooseFolder()
+    {
+        using var dialog = new System.Windows.Forms.FolderBrowserDialog
+        {
+            Description = "이 폴더와 하위 폴더의 기록을 검색합니다",
+            UseDescriptionForTitle = true,
+            SelectedPath = FolderFilter
+        };
+        if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK) FolderFilter = dialog.SelectedPath;
+    }
+
+    private void RemoveFilter(FilterChip chip)
+    {
+        switch (chip.Key)
+        {
+            case "extension": ExtensionFilter = string.Empty; break;
+            case "exists": SelectedExistence = ExistenceOptions[0]; break;
+            case "folder": FolderFilter = string.Empty; break;
+            case "date": SelectedDateRange = DateRanges[0]; break;
+        }
+    }
 
     public IReadOnlyList<RecentItem> Items
     {
         get => _items;
         private set => SetField(ref _items, value);
+    }
+
+    public IReadOnlyList<ActivityWeek> ActivityWeeks
+    {
+        get => _activityWeeks;
+        private set => SetField(ref _activityWeeks, value);
+    }
+
+    public string ActivityPeriodText
+    {
+        get => _activityPeriodText;
+        private set => SetField(ref _activityPeriodText, value);
+    }
+
+    public string ActivitySummaryText
+    {
+        get => _activitySummaryText;
+        private set => SetField(ref _activitySummaryText, value);
     }
 
     public IReadOnlyList<DateRangeOption> DateRanges { get; } =
@@ -63,12 +148,24 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _settings = settings;
         _log = log;
         _selectedDateRange = DateRanges[0];
+        _selectedExistence = ExistenceOptions[0];
+        ChooseFolderCommand = new RelayCommand(ChooseFolder);
+        RemoveFilterCommand = new RelayCommand<FilterChip>(RemoveFilter);
+        ClearFiltersCommand = new RelayCommand(() =>
+        {
+            ExtensionFilter = string.Empty;
+            FolderFilter = string.Empty;
+            SelectedExistence = ExistenceOptions[0];
+            SelectedDateRange = DateRanges[0];
+        });
         _autoStartEnabled = TryGetAutoStart(autoStart);
 
         RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
         OpenCommand = new RelayCommand(OpenSelected, () => SelectedItem is not null);
         RevealCommand = new RelayCommand(RevealSelected, () => SelectedItem is not null);
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty, () => SearchText.Length > 0);
+        SelectActivityDateCommand = new RelayCommand<ActivityDay>(SelectActivityDate,
+            day => day.CanSelect);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -77,6 +174,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public RelayCommand OpenCommand { get; }
     public RelayCommand RevealCommand { get; }
     public RelayCommand ClearSearchCommand { get; }
+    public RelayCommand<ActivityDay> SelectActivityDateCommand { get; }
 
     public string SearchText
     {
@@ -99,6 +197,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (value is not null && SetField(ref _selectedDateRange, value))
             {
                 OnPropertyChanged(nameof(IsSpecificDateSelected));
+                OnPropertyChanged(nameof(FilterChips));
+                UpdateActivitySelection();
                 ScheduleReload();
             }
         }
@@ -112,9 +212,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         set
         {
             var normalizedDate = (value ?? DateTime.Today).Date;
-            if (SetField(ref _specificDate, normalizedDate) && IsSpecificDateSelected)
+            if (SetField(ref _specificDate, normalizedDate))
             {
-                ScheduleReload();
+                OnPropertyChanged(nameof(FilterChips));
+                UpdateActivitySelection();
+                if (IsSpecificDateSelected)
+                {
+                    ScheduleReload();
+                }
             }
         }
     }
@@ -240,6 +345,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             await _monitor.StartAsync();
             UpdateMonitorStatus();
             await LoadAsync(CancellationToken.None);
+            await LoadActivityAsync(CancellationToken.None);
             StatusText = "최근 항목 폴더를 실시간으로 감시하고 있습니다.";
         }
         finally
@@ -260,6 +366,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             await _database.MoveToAsync(destinationPath);
             NotifyDatabaseLocationChanged();
             await LoadAsync(CancellationToken.None);
+            await LoadActivityAsync(CancellationToken.None);
             StatusText = "데이터베이스와 기존 기록을 새 위치로 이동했습니다.";
             return true;
         }
@@ -321,6 +428,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             _settings.SetDatabasePath(_database.DatabasePath);
             NotifyDatabaseLocationChanged();
             await LoadAsync(CancellationToken.None);
+            await LoadActivityAsync(CancellationToken.None);
             StatusText = "선택한 데이터베이스를 사용합니다.";
             return true;
         }
@@ -448,6 +556,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             var captured = await _monitor.ScanAsync(notifyChanges: false);
             await LoadAsync(CancellationToken.None);
+            await LoadActivityAsync(CancellationToken.None);
             StatusText = $"최근 항목 {captured:N0}개를 확인했습니다.";
         }
         catch (Exception ex)
@@ -490,6 +599,118 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }, token);
     }
 
+    private void ScheduleActivityReload()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _activityCancellation?.Cancel();
+        _activityCancellation?.Dispose();
+        _activityCancellation = new CancellationTokenSource();
+        var token = _activityCancellation.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(250, token);
+                await System.Windows.Application.Current.Dispatcher
+                    .InvokeAsync(() => LoadActivityAsync(token)).Task.Unwrap();
+            }
+            catch (OperationCanceledException)
+            {
+                // 여러 파일 감시 이벤트를 하나의 활동 집계 갱신으로 합친다.
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Activity heatmap refresh failed.", ex);
+            }
+        }, token);
+    }
+
+    private async Task LoadActivityAsync(CancellationToken cancellationToken)
+    {
+        const int weekCount = 16;
+        var today = DateTime.Today;
+        var daysSinceMonday = ((int)today.DayOfWeek + 6) % 7;
+        var firstMonday = today.AddDays(-daysSinceMonday - ((weekCount - 1) * 7));
+        var range = HistoryDateRangeFactory.CreateLocalCalendarRange(
+            firstMonday, today.AddDays(1), "최근 16주");
+        var activity = await Task.Run(() => _database.GetDailyActivityAsync(
+            range, cancellationToken: cancellationToken), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var byDate = activity.ToDictionary(day => day.Date.Date);
+        var maximumCount = activity.Count == 0 ? 0 : activity.Max(day => day.OpenCount);
+        var selectedDate = IsSpecificDateSelected ? SpecificDate?.Date : null;
+        var weeks = new List<ActivityWeek>(weekCount);
+        for (var weekIndex = 0; weekIndex < weekCount; weekIndex++)
+        {
+            var days = new List<ActivityDay>(7);
+            for (var dayIndex = 0; dayIndex < 7; dayIndex++)
+            {
+                var date = firstMonday.AddDays((weekIndex * 7) + dayIndex);
+                byDate.TryGetValue(date, out var daily);
+                var openCount = daily?.OpenCount ?? 0;
+                days.Add(new ActivityDay(
+                    date,
+                    openCount,
+                    CalculateActivityLevel(openCount, maximumCount),
+                    daily?.ContainsEstimated ?? false,
+                    date == today,
+                    selectedDate == date,
+                    date <= today));
+            }
+
+            weeks.Add(new ActivityWeek(days));
+        }
+
+        ActivityWeeks = weeks;
+        ActivityPeriodText = $"{firstMonday:yyyy.MM.dd} – {today:yyyy.MM.dd}";
+        ActivitySummaryText = $"{activity.Sum(day => day.OpenCount):N0}회 · " +
+                              $"활동 {activity.Count:N0}일";
+    }
+
+    private static int CalculateActivityLevel(int count, int maximumCount)
+    {
+        if (count <= 0 || maximumCount <= 0)
+        {
+            return 0;
+        }
+
+        var normalized = Math.Log(count + 1d) / Math.Log(maximumCount + 1d);
+        return Math.Clamp((int)Math.Ceiling(normalized * 4d), 1, 4);
+    }
+
+    private void SelectActivityDate(ActivityDay day)
+    {
+        if (!day.CanSelect)
+        {
+            return;
+        }
+
+        SpecificDate = day.Date;
+        SelectedDateRange = DateRanges.First(option => option.IsSpecificDate);
+        StatusText = $"{day.Date:yyyy-MM-dd}에 열었던 파일을 표시합니다.";
+    }
+
+    private void UpdateActivitySelection()
+    {
+        if (ActivityWeeks.Count == 0)
+        {
+            return;
+        }
+
+        var selectedDate = IsSpecificDateSelected ? SpecificDate?.Date : null;
+        ActivityWeeks = ActivityWeeks
+            .Select(week => new ActivityWeek(week.Days
+                .Select(day => day with { IsSelected = day.Date == selectedDate })
+                .ToArray()))
+            .ToArray();
+    }
+
     private async Task LoadAsync(
         CancellationToken cancellationToken,
         long? requestStartedTimestamp = null)
@@ -499,8 +720,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var selectedId = SelectedItem?.Id;
         var searchText = SearchText;
         var dateRange = BuildSelectedDateRange();
+        var filters = new HistoryFilters(ExtensionFilter, SelectedExistence.Exists, FolderFilter);
         var snapshot = await Task.Run(
-            () => _database.SearchWithStatsAsync(searchText, dateRange, cancellationToken: cancellationToken),
+            () => _database.SearchWithStatsAsync(searchText, dateRange, cancellationToken: cancellationToken, filters: filters),
             cancellationToken);
 
         if (sequence != Volatile.Read(ref _loadSequence))
@@ -561,7 +783,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnHistoryChanged(object? sender, EventArgs e) =>
-        System.Windows.Application.Current.Dispatcher.InvokeAsync(ScheduleReload);
+        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            ScheduleReload();
+            ScheduleActivityReload();
+        });
 
     private void OnMonitorError(object? sender, string message)
     {
@@ -714,6 +940,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _monitor.DiagnosticsChanged -= OnDiagnosticsChanged;
         _searchCancellation?.Cancel();
         _searchCancellation?.Dispose();
+        _activityCancellation?.Cancel();
+        _activityCancellation?.Dispose();
         _searchCancellation = null;
+        _activityCancellation = null;
     }
 }

@@ -133,6 +133,20 @@ try
     Assert(!secondDaySnapshot.Items[0].IsEstimatedHistory,
         "새로 수집한 날짜 기록이 추정 기록으로 표시되었습니다.");
 
+    var activityRange = new HistoryDateRange(
+        new DateTimeOffset(2026, 9, 20, 0, 0, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 9, 23, 0, 0, 0, TimeSpan.Zero),
+        "활동 집계 테스트");
+    var dailyActivity = await database.GetDailyActivityAsync(activityRange, TimeZoneInfo.Utc);
+    Assert(dailyActivity.Count == 2,
+        "열기 이벤트가 있는 날짜만 활동 집계에 포함되지 않았습니다.");
+    Assert(dailyActivity.Single(day => day.Date == new DateTime(2026, 9, 20)).OpenCount == 1,
+        "첫 번째 날짜의 활동 횟수가 정확하지 않습니다.");
+    Assert(dailyActivity.Single(day => day.Date == new DateTime(2026, 9, 21)).OpenCount == 2,
+        "중복 이벤트 제거 후 두 번째 날짜의 활동 횟수가 정확하지 않습니다.");
+    Assert(dailyActivity.All(day => !day.ContainsEstimated),
+        "새로 수집한 활동이 추정 기록으로 잘못 표시되었습니다.");
+
     var emptyDayRange = new HistoryDateRange(
         new DateTimeOffset(2026, 9, 22, 0, 0, 0, TimeSpan.Zero),
         new DateTimeOffset(2026, 9, 23, 0, 0, 0, TimeSpan.Zero),
@@ -167,6 +181,28 @@ try
         "날짜 범위가 시작 시각 포함·종료 시각 제외 또는 중복 이벤트 제거 규칙을 지키지 않았습니다.");
     Assert(boundarySnapshot.Items[0].LastSeen == boundaryEnd.AddTicks(-1),
         "날짜 범위 종료 직전 이벤트를 찾지 못했거나 종료 경계 이벤트를 포함했습니다.");
+
+    var filtered = await database.SearchWithStatsAsync("boundary", boundaryRange,
+        filters: new HistoryFilters("*.txt", false, Path.Combine(testRoot, "timeline")));
+    Assert(filtered.Items.Count == 1 && filtered.Items[0].OpenCount == 2,
+        "검색어·날짜·확장자·존재 여부·폴더 AND 필터가 동작하지 않습니다.");
+    Assert((await database.SearchWithStatsAsync("boundary", boundaryRange,
+        filters: new HistoryFilters("TXT", true))).Items.Count == 0,
+        "존재 여부 필터가 다른 상태의 기록을 반환했습니다.");
+    Assert((await database.SearchWithStatsAsync("boundary", boundaryRange,
+        filters: new HistoryFilters("PDF"))).Items.Count == 0,
+        "확장자 필터가 다른 확장자를 반환했습니다.");
+    Assert((await database.SearchWithStatsAsync("boundary", boundaryRange,
+        filters: new HistoryFilters(Folder: Path.Combine(testRoot, "time")))).Items.Count == 0,
+        "폴더 필터가 이름의 일부만 같은 인접 폴더를 반환했습니다.");
+    var literalFolder = Path.Combine(testRoot, "work_%");
+    await database.UpsertAsync(new RecentItemCandidate(Path.Combine(literalFolder, "nested", "literal.txt"),
+        "literal.txt", "TXT", "파일", Path.Combine(testRoot, "literal.lnk"), boundaryStart, true));
+    await database.UpsertAsync(new RecentItemCandidate(Path.Combine(testRoot, "work_X", "literal.txt"),
+        "literal.txt", "TXT", "파일", Path.Combine(testRoot, "other-literal.lnk"), boundaryStart, true));
+    Assert((await database.SearchWithStatsAsync("literal", boundaryRange,
+        filters: new HistoryFilters(".txt", true, literalFolder))).Items.Count == 1,
+        "폴더의 LIKE 특수문자를 리터럴로 처리하거나 하위 폴더를 포함하지 못했습니다.");
 
     var pacific = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
     var springDstRange = HistoryDateRangeFactory.CreateLocalCalendarRange(
@@ -264,6 +300,13 @@ try
         var legacyDiagnostics = await legacyDatabase.GetDiagnosticsAsync();
         Assert(legacyDiagnostics.EstimatedEvents == 1,
             "기존 DB에서 이관한 추정 이벤트가 진단 통계에 반영되지 않았습니다.");
+        var legacyActivity = await legacyDatabase.GetDailyActivityAsync(
+            HistoryDateRangeFactory.CreateLocalCalendarRange(
+                new DateTime(2026, 8, 15), new DateTime(2026, 8, 16), "기존 활동",
+                TimeZoneInfo.Utc),
+            TimeZoneInfo.Utc);
+        Assert(legacyActivity.Count == 1 && legacyActivity[0].ContainsEstimated,
+            "이관된 추정 이벤트가 날짜별 활동 집계에 표시되지 않았습니다.");
     }
 
     var recentFolder = Path.Combine(testRoot, "recent-folder");
@@ -307,7 +350,7 @@ try
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장, 검색, 날짜 경계/DST, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
+    Console.WriteLine("PASS: 로그, 저장, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }
 finally
 {

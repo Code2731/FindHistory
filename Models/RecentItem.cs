@@ -29,9 +29,38 @@ public sealed record RecentItem(
 
 public sealed record HistoryStats(long UniqueItems, long TotalOpenCount);
 
+public sealed record HistoryFilters(string Extension = "", bool? Exists = null, string Folder = "");
+public sealed record ExistenceOption(string Label, bool? Exists)
+{
+    public override string ToString() => Label;
+}
+public sealed record FilterChip(string Key, string Label);
+
 public sealed record SearchSnapshot(
     IReadOnlyList<RecentItem> Items,
     HistoryStats Stats);
+
+public sealed record DailyActivity(
+    DateTime Date,
+    int OpenCount,
+    bool ContainsEstimated);
+
+public sealed record ActivityDay(
+    DateTime Date,
+    int OpenCount,
+    int Level,
+    bool ContainsEstimated,
+    bool IsToday,
+    bool IsSelected,
+    bool CanSelect)
+{
+    public string ToolTipText => !CanSelect
+        ? Date.ToString("yyyy-MM-dd")
+        : $"{Date:yyyy-MM-dd} · {OpenCount:N0}회" +
+          (ContainsEstimated ? " · 일부 추정" : string.Empty);
+}
+
+public sealed record ActivityWeek(IReadOnlyList<ActivityDay> Days);
 
 public sealed record HistoryDateRange(
     DateTimeOffset StartUtc,
