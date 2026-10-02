@@ -73,7 +73,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 
 ### 다운로드
 
-[GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest)에서 `FindHistory-v1.0-win-x64.zip`을 내려받아 압축을 풀고 `FindHistory.exe`를 실행하세요. 공식 ZIP은 .NET 런타임을 포함하므로 별도로 설치할 필요가 없습니다.
+[GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest)에서 최신 릴리즈에 첨부된 `win-x64` ZIP을 내려받아 압축을 풀고 `FindHistory.exe`를 실행하세요. 공식 ZIP은 .NET 런타임을 포함하므로 별도로 설치할 필요가 없습니다.
 
 ### 요구 사항
 
@@ -217,7 +217,7 @@ For the most accurate date history, enable **background startup at Windows sign-
 
 ### Download
 
-Download `FindHistory-v1.0-win-x64.zip` from [GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest), extract it, and run `FindHistory.exe`. The official ZIP is self-contained, so no separate .NET runtime installation is required.
+Download the `win-x64` ZIP attached to the latest release from [GitHub Releases](https://github.com/Code2731/FindHistory/releases/latest), extract it, and run `FindHistory.exe`. The official ZIP is self-contained, so no separate .NET runtime installation is required.
 
 ### Requirements
 

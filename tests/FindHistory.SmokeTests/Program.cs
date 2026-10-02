@@ -253,6 +253,21 @@ try
     Assert((await database.SearchAsync("other", null)).Count == 1,
         "잘못된 DB 선택 뒤 기존 DB 연결이 손상되었습니다.");
 
+    var malformedSchemaPath = Path.Combine(testRoot, "malformed-schema.db");
+    await using (var malformedConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+                     $"Data Source={malformedSchemaPath};Pooling=False"))
+    {
+        await malformedConnection.OpenAsync();
+        await using var malformedCommand = malformedConnection.CreateCommand();
+        malformedCommand.CommandText = "CREATE TABLE recent_items (id INTEGER PRIMARY KEY);";
+        await malformedCommand.ExecuteNonQueryAsync();
+    }
+    await AssertThrowsAsync(() => database.UseAsync(malformedSchemaPath),
+        "필수 컬럼이 빠진 FindHistory 유사 DB를 허용했습니다.");
+    Assert(string.Equals(database.DatabasePath, otherPath, StringComparison.OrdinalIgnoreCase) &&
+           (await database.SearchAsync("other", null)).Count == 1,
+        "스키마가 잘못된 DB 거부 후 기존 DB 연결이 유지되지 않았습니다.");
+
     var futureSchemaPath = Path.Combine(testRoot, "future-schema.db");
     await using (var futureConnection = new Microsoft.Data.Sqlite.SqliteConnection(
                      $"Data Source={futureSchemaPath};Pooling=False"))

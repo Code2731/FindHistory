@@ -1,6 +1,9 @@
 # FindHistory 성능 기준선과 최적화 결과
 
-측정일: 2026-09-24  
+이 문서는 .NET 8 초기 기준선과 .NET 10 재검증 결과를 별도 구간으로 보존합니다. 현재 프로젝트는 .NET 10을 대상으로 합니다.
+
+## .NET 8 초기 기준선 — 2026-09-24
+
 환경: Windows 10.0.26200, .NET 8.0.23, Release 빌드, 로컬 SQLite
 
 ## 결론
@@ -87,7 +90,7 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --recent-only
 ```
 
-## 2026-09-29 .NET 10 재검증
+## 현재 기준 — .NET 10 재검증, 2026-09-29
 
 환경: Windows 10.0.26200, .NET 10.0.2, Microsoft.Data.Sqlite 10.0.12, Release 빌드
 

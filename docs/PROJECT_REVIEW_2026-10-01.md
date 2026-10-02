@@ -104,3 +104,5 @@ docs/         ROADMAP, PERFORMANCE
 - DB schema `user_version=1` 도입: 기존 날짜 이벤트 이관과 초기 통계 행 생성을 한 트랜잭션에서 한 번만 실행. 미래 버전 DB는 거부.
 - FTS UPDATE 트리거를 `display_name`/`target_path` 실제 변경 때만 실행하도록 교체.
 - 반복 초기화 후 이벤트 중복·통계 보존 및 기존 트리거 교체 회귀 검증을 추가.
+- DB 전환 시 `recent_items` 필수 컬럼과 스키마 버전을 읽기 전용으로 검사하도록 강화.
+- `.sln`과 Windows Actions 빌드·스모크 워크플로 추가, README ZIP 안내와 성능 보고서 런타임 구간을 명확히 정리.

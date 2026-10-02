@@ -505,6 +505,37 @@ public sealed class RecentDatabase : IDisposable
         {
             throw new InvalidDataException("FindHistory 데이터베이스 형식이 아닙니다.");
         }
+
+        command.CommandText = "PRAGMA user_version;";
+        var schemaVersion = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+        if (schemaVersion > CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"선택한 데이터베이스의 스키마 버전 {schemaVersion}은 지원되지 않습니다.");
+        }
+
+        command.CommandText = "PRAGMA table_info(recent_items);";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        string[] requiredColumns =
+        [
+            "id", "target_path", "display_name", "extension", "item_kind",
+            "source_link_path", "first_seen_utc", "last_seen_utc",
+            "last_link_write_utc", "open_count", "exists_flag"
+        ];
+        var missingColumns = requiredColumns.Where(column => !columns.Contains(column)).ToArray();
+        if (missingColumns.Length > 0)
+        {
+            throw new InvalidDataException(
+                $"선택한 DB의 recent_items 테이블에 필수 열이 없습니다: {string.Join(", ", missingColumns)}");
+        }
     }
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken = default)
