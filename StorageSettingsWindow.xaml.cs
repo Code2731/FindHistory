@@ -166,6 +166,49 @@ public partial class StorageSettingsWindow : Window
         }
     }
 
+    private async void OnExportCsvClick(object sender, RoutedEventArgs e) => await ExportAsync("csv");
+
+    private async void OnExportJsonClick(object sender, RoutedEventArgs e) => await ExportAsync("json");
+
+    private async Task ExportAsync(string format)
+    {
+        var isCsv = format.Equals("csv", StringComparison.OrdinalIgnoreCase);
+        var extension = isCsv ? ".csv" : ".json";
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = isCsv ? "전체 기록을 CSV로 내보내기" : "전체 기록을 JSON으로 내보내기",
+            Filter = isCsv ? "CSV 파일 (*.csv)|*.csv" : "JSON 파일 (*.json)|*.json",
+            DefaultExt = extension,
+            AddExtension = true,
+            OverwritePrompt = true,
+            InitialDirectory = _viewModel.DatabaseDirectory,
+            FileName = $"FindHistory-export-{DateTime.Now:yyyyMMdd-HHmmss}{extension}"
+        };
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        IsEnabled = false;
+        try
+        {
+            if (await _viewModel.ExportDatabaseAsync(dialog.FileName, format))
+            {
+                System.Windows.MessageBox.Show($"전체 기록을 내보냈습니다.\n\n{dialog.FileName}",
+                    "내보내기 완료", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                System.Windows.MessageBox.Show(_viewModel.StatusText, "내보내기 실패",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+        finally
+        {
+            IsEnabled = true;
+        }
+    }
+
     private void OnOpenFolderClick(object sender, RoutedEventArgs e) => _viewModel.OpenDatabaseFolder();
 
     private void OnCloseClick(object sender, RoutedEventArgs e) => Close();

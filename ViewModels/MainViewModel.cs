@@ -546,6 +546,28 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    public async Task<bool> ExportDatabaseAsync(string destinationPath, string format)
+    {
+        IsBusy = true;
+        StatusText = $"전체 기록을 {format.ToUpperInvariant()} 파일로 내보내는 중…";
+        try
+        {
+            await _database.ExportToAsync(destinationPath, format);
+            StatusText = $"전체 기록을 내보냈습니다: {destinationPath}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Database {format} export failed.", ex);
+            StatusText = $"내보내기에 실패했습니다: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     private static bool TryGetAutoStart(AutoStartService autoStart)
     {
         try

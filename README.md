@@ -123,6 +123,8 @@ dotnet publish -c Release --self-contained false -o publish
 
 메인 화면의 **데이터 저장소**에서 기록을 유지한 채 DB를 다른 폴더로 옮기거나, 다른 위치의 기존 `findhistory.db`를 선택할 수 있습니다. DB는 실행 파일과 별도로 유지되므로 앱을 업데이트하거나 게시 폴더를 교체해도 기록이 남습니다.
 
+같은 화면에서 전체 기록을 CSV 또는 JSON으로 내보낼 수 있습니다. 두 형식 모두 파일별 요약과 개별 열기 이력을 포함하며, CSV는 Excel에서 수식으로 실행될 수 있는 값에 안전 접두사를 붙입니다. 현재 검색 조건만 내보내는 기능은 별도 작업으로 남아 있습니다.
+
 같은 화면의 **백업 저장**은 SQLite 온라인 백업으로 일관된 백업 파일을 만듭니다. **백업 복원**은 유효한 FindHistory DB인지 먼저 검사하고, 현재 데이터베이스를 고유한 안전 사본으로 보관한 뒤 선택한 백업으로 복원합니다. 백업은 앱 설정 파일과 별개이므로, 저장된 검색 조건을 함께 보존하려면 `%LocalAppData%\FindHistory\settings.json`도 별도로 복사하세요.
 
 검색 조건을 설정한 뒤 **검색 저장**을 눌러 이름을 지정하면 로컬 설정에 저장됩니다. 저장 검색 목록에서 조건을 다시 적용하거나 선택 삭제할 수 있습니다. 최근 7일 같은 상대 기간은 불러온 시점을 기준으로 계산하고, 날짜 지정 검색은 저장 당시 선택 날짜를 유지합니다.
@@ -193,6 +195,7 @@ Your history is not sent to an external server. It remains in the database file 
 - Saves up to 30 named search combinations locally and restores them later
 - Opens a file or reveals its location in File Explorer
 - Moves the current database or switches to an existing `findhistory.db`
+- Exports the complete history and per-open events to CSV or JSON
 - Keeps recording in the system tray after the window is closed
 - Optional background startup at Windows sign-in
 - Diagnostics window for watcher health, database statistics, and the latest error
@@ -279,6 +282,8 @@ Diagnostic logs remain local and files older than 14 days are removed at applica
 Use **Data storage** on the main screen to move the database without losing existing history, or select an existing `findhistory.db` elsewhere. The database is kept separately from the executable, so replacing or updating the publish directory does not remove your history.
 
 **Save Backup** creates a consistent SQLite online backup. **Restore Backup** validates that the selected file is a FindHistory database, preserves the current database as a uniquely named safety copy, and then restores the selected backup. Backups do not include app settings; copy `%LocalAppData%\FindHistory\settings.json` separately if you also want to preserve saved searches.
+
+Export the complete history as CSV or JSON from **Data storage**. Both formats include item summaries and individual open events. CSV prefixes spreadsheet formula-like values for safer opening in Excel. Exporting only the current search results is not yet supported.
 
 Set the desired conditions and choose **Save Search** to name and store them in local settings. Select a saved search to apply it again or delete the selected entry. Relative periods such as Last 7 days are recalculated when applied; a specific date keeps the date selected when it was saved.
 

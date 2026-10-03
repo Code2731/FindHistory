@@ -1,5 +1,6 @@
 using FindHistory.Models;
 using FindHistory.Services;
+using System.Text.Json;
 
 var testRoot = Path.Combine(Path.GetTempPath(), $"FindHistory-Smoke-{Guid.NewGuid():N}");
 Directory.CreateDirectory(testRoot);
@@ -219,6 +220,35 @@ try
         "데이터베이스 진단 통계를 읽지 못했습니다.");
     Assert(databaseDiagnostics.EstimatedEvents == 0,
         "새 데이터베이스 이벤트가 추정 기록으로 집계되었습니다.");
+
+    var formulaLikeName = "=HYPERLINK(\"https://example.invalid\")";
+    await database.UpsertAsync(new RecentItemCandidate(
+        Path.Combine(testRoot, "formula-like.csv"), formulaLikeName, "CSV", "파일",
+        Path.Combine(testRoot, "formula-like.lnk"), DateTimeOffset.UtcNow, false));
+    var exportDiagnostics = await database.GetDiagnosticsAsync();
+    var csvExportPath = Path.Combine(testRoot, "exports", "history.csv");
+    var jsonExportPath = Path.Combine(testRoot, "exports", "history.json");
+    await database.ExportToAsync(csvExportPath, "csv");
+    await database.ExportToAsync(jsonExportPath, ".json");
+    var csvText = await File.ReadAllTextAsync(csvExportPath);
+    Assert(csvText.Contains("'=HYPERLINK", StringComparison.Ordinal),
+        "CSV 내보내기에서 스프레드시트 수식 입력을 안전하게 처리하지 않았습니다.");
+    Assert(csvText.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length ==
+           exportDiagnostics.StoredEvents + 1,
+        "CSV 내보내기에 개별 열기 이벤트 전체가 들어가지 않았습니다.");
+    using (var jsonDocument = JsonDocument.Parse(await File.ReadAllTextAsync(jsonExportPath)))
+    {
+        var root = jsonDocument.RootElement;
+        Assert(root.GetProperty("schemaVersion").GetInt32() == 1,
+            "JSON 내보내기에 스키마 버전이 없습니다.");
+        var items = root.GetProperty("items").EnumerateArray().ToArray();
+        var formulaItem = items.Single(item => item.GetProperty("displayName").GetString() == formulaLikeName);
+        Assert(formulaItem.GetProperty("events").GetArrayLength() == 1,
+            "JSON 내보내기에 개별 열기 이벤트가 들어가지 않았습니다.");
+        Assert(items.Sum(item => item.GetProperty("events").GetArrayLength()) ==
+               exportDiagnostics.StoredEvents,
+            "JSON 내보내기에 전체 열기 이벤트가 들어가지 않았습니다.");
+    }
 
     var preBackupItemCount = (await database.GetStatsAsync()).UniqueItems;
     var backupPath = Path.Combine(testRoot, "backups", "findhistory.fhbackup");
@@ -449,7 +479,7 @@ try
     Assert(new AppSettingsService(settingsPath).SavedSearches.Count == 0,
         "저장 검색 삭제가 설정 파일에 반영되지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장/복원, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
+    Console.WriteLine("PASS: 로그, 저장/복원/내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
 }
 finally
 {

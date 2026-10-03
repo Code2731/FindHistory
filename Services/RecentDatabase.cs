@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using FindHistory.Models;
 using Microsoft.Data.Sqlite;
 
@@ -290,6 +292,165 @@ public sealed class RecentDatabase : IDisposable
         {
             _databaseGate.Release();
         }
+    }
+
+    public async Task ExportToAsync(
+        string destinationPath, string format, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        var targetPath = Path.GetFullPath(destinationPath);
+        var normalizedFormat = format.Trim().TrimStart('.').ToLowerInvariant();
+        if (normalizedFormat is not ("csv" or "json"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "내보내기 형식은 CSV 또는 JSON이어야 합니다.");
+        }
+
+        await _databaseGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("내보내기 파일은 현재 데이터베이스와 다른 경로여야 합니다.");
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            var temporaryPath = targetPath + $".{Guid.NewGuid():N}.tmp";
+            try
+            {
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+                await using var command = connection.CreateCommand();
+                command.Transaction = (SqliteTransaction)transaction;
+                command.CommandText = """
+                    SELECT r.id, r.target_path, r.display_name, r.extension, r.item_kind,
+                           r.source_link_path, r.first_seen_utc, r.last_seen_utc,
+                           r.last_link_write_utc, r.open_count, r.exists_flag,
+                           e.opened_utc, e.source_link_path, e.is_estimated
+                    FROM recent_items AS r
+                    LEFT JOIN open_events AS e ON e.recent_item_id = r.id
+                    ORDER BY r.id, e.opened_utc, e.id;
+                    """;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await using (var output = new FileStream(temporaryPath, FileMode.CreateNew,
+                                 FileAccess.Write, FileShare.None, 64 * 1024, useAsync: true))
+                {
+                    if (normalizedFormat == "csv")
+                    {
+                        await WriteCsvExportAsync(reader, output, cancellationToken);
+                    }
+                    else
+                    {
+                        await WriteJsonExportAsync(reader, output, cancellationToken);
+                    }
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+                File.Move(temporaryPath, targetPath, overwrite: true);
+            }
+            finally
+            {
+                DeleteCheckpointSidecar(temporaryPath);
+            }
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private static async Task WriteCsvExportAsync(
+        SqliteDataReader reader, Stream output, CancellationToken cancellationToken)
+    {
+        await using var writer = new StreamWriter(output, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
+            64 * 1024, leaveOpen: true);
+        await writer.WriteLineAsync(
+            "ItemId,TargetPath,DisplayName,Extension,ItemKind,SourceLinkPath,FirstSeenUtc,LastSeenUtc," +
+            "LastLinkWriteUtc,OpenCount,Exists,EventOpenedUtc,EventSourceLinkPath,EventIsEstimated");
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var itemValues = new string[]
+            {
+                reader.GetInt64(0).ToString(CultureInfo.InvariantCulture),
+                CsvCell(reader.GetString(1)), CsvCell(reader.GetString(2)), CsvCell(reader.GetString(3)),
+                CsvCell(reader.GetString(4)), CsvCell(reader.GetString(5)), CsvCell(reader.GetString(6)),
+                CsvCell(reader.GetString(7)), CsvCell(reader.GetString(8)),
+                reader.GetInt32(9).ToString(CultureInfo.InvariantCulture),
+                reader.GetInt32(10) == 1 ? "true" : "false"
+            };
+            var eventValues = reader.IsDBNull(11)
+                ? new[] { "", "", "" }
+                : new[]
+                {
+                    CsvCell(reader.GetString(11)), CsvCell(reader.GetString(12)),
+                    reader.GetInt32(13) == 1 ? "true" : "false"
+                };
+            await writer.WriteLineAsync(string.Join(",", itemValues.Concat(eventValues)));
+        }
+
+        await writer.FlushAsync(cancellationToken);
+    }
+
+    private static async Task WriteJsonExportAsync(
+        SqliteDataReader reader, Stream output, CancellationToken cancellationToken)
+    {
+        using var writer = new Utf8JsonWriter(output, new JsonWriterOptions
+        {
+            Indented = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        });
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        writer.WriteStartObject();
+        writer.WriteNumber("schemaVersion", 1);
+        writer.WriteString("exportedAtUtc", DateTimeOffset.UtcNow);
+        writer.WriteStartArray("items");
+
+        HistoryExportItem? currentItem = null;
+        List<HistoryExportEvent>? currentEvents = null;
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var itemId = reader.GetInt64(0);
+            if (currentItem?.Id != itemId)
+            {
+                if (currentItem is not null)
+                {
+                    JsonSerializer.Serialize(writer, currentItem with { Events = currentEvents! }, options);
+                }
+
+                currentItem = new HistoryExportItem(
+                    itemId, reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                    reader.GetString(4), reader.GetString(5), ParseExportDate(reader.GetString(6)),
+                    ParseExportDate(reader.GetString(7)), ParseExportDate(reader.GetString(8)),
+                    reader.GetInt32(9), reader.GetInt32(10) == 1, []);
+                currentEvents = [];
+            }
+
+            if (!reader.IsDBNull(11))
+            {
+                currentEvents!.Add(new HistoryExportEvent(
+                    ParseExportDate(reader.GetString(11)), reader.GetString(12), reader.GetInt32(13) == 1));
+            }
+        }
+
+        if (currentItem is not null)
+        {
+            JsonSerializer.Serialize(writer, currentItem with { Events = currentEvents! }, options);
+        }
+
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        await writer.FlushAsync(cancellationToken);
+    }
+
+    private static DateTimeOffset ParseExportDate(string value) =>
+        DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+    private static string CsvCell(string value)
+    {
+        var firstSignificant = value.TrimStart(' ', '\t', '\r', '\n');
+        var safeValue = firstSignificant.Length > 0 && firstSignificant[0] is '=' or '+' or '-' or '@'
+            ? "'" + value
+            : value;
+        return $"\"{safeValue.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
     }
 
     public async Task<DatabaseDiagnostics> GetDiagnosticsAsync(
