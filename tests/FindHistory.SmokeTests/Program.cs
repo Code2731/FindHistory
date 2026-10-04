@@ -281,8 +281,28 @@ try
     Assert((await database.GetStatsAsync()).UniqueItems == preBackupItemCount,
         "잘못된 백업 시도가 현재 DB를 변경했습니다.");
 
+    var failedMovePath = Path.Combine(testRoot, "failed-move", "findhistory.db");
+    await AssertThrowsAsync(
+        () => database.MoveToAsync(failedMovePath, _ => throw new IOException("설정 저장 실패")),
+        "설정 저장 실패 시 DB 이동이 중단되지 않았습니다.");
+    Assert(string.Equals(database.DatabasePath, originalPath, StringComparison.OrdinalIgnoreCase),
+        "설정 저장 실패 뒤 현재 DB 경로가 바뀌었습니다.");
+    Assert(File.Exists(originalPath), "설정 저장 실패 뒤 원본 DB가 보존되지 않았습니다.");
+    Assert(!File.Exists(failedMovePath), "설정 저장 실패 뒤 이동 대상 DB가 정리되지 않았습니다.");
+    Assert((await database.SearchAsync("sample", null)).Count == 1,
+        "설정 저장 실패 뒤 원본 DB에서 기존 기록을 읽지 못했습니다.");
+
     var movedPath = Path.Combine(testRoot, "moved", "findhistory.db");
-    await database.MoveToAsync(movedPath);
+    var persistedMovePath = string.Empty;
+    var previousDatabaseRemoved = await database.MoveToAsync(movedPath, path =>
+    {
+        Assert(File.Exists(originalPath), "새 경로를 저장하기 전에 원본 DB가 삭제되었습니다.");
+        Assert(File.Exists(path), "새 경로를 저장하기 전에 대상 DB가 준비되지 않았습니다.");
+        persistedMovePath = path;
+    });
+    Assert(string.Equals(persistedMovePath, movedPath, StringComparison.OrdinalIgnoreCase),
+        "DB 이동 전에 새 경로 설정이 저장되지 않았습니다.");
+    Assert(previousDatabaseRemoved, "정상 이동 뒤 이전 DB 파일이 정리되지 않았습니다.");
     Assert(File.Exists(movedPath), "DB 파일이 새 위치로 이동되지 않았습니다.");
     Assert(!File.Exists(originalPath), "이전 위치에 DB 파일이 남아 있습니다.");
 

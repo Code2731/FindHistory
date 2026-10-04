@@ -573,7 +573,10 @@ public sealed class RecentDatabase : IDisposable
         }
     }
 
-    public async Task MoveToAsync(string destinationPath, CancellationToken cancellationToken = default)
+    public async Task<bool> MoveToAsync(
+        string destinationPath,
+        Action<string>? persistNewPath = null,
+        CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         var targetPath = Path.GetFullPath(destinationPath);
@@ -585,7 +588,7 @@ public sealed class RecentDatabase : IDisposable
             {
                 if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
                 {
-                    return;
+                    return true;
                 }
                 if (File.Exists(targetPath))
                 {
@@ -593,16 +596,49 @@ public sealed class RecentDatabase : IDisposable
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-                await CheckpointAsync(cancellationToken);
-
                 var sourcePath = _databasePath;
-                File.Move(sourcePath, targetPath);
-                DeleteCheckpointSidecar(sourcePath + "-wal");
-                DeleteCheckpointSidecar(sourcePath + "-shm");
+                var sourceFtsAvailable = _ftsAvailable;
+                var temporaryPath = targetPath + $".{Guid.NewGuid():N}.tmp";
+                var targetCreated = false;
+                var pathPersisted = false;
+                try
+                {
+                    await BackupDatabaseFileAsync(sourcePath, temporaryPath, cancellationToken);
+                    await ValidateFindHistoryDatabaseAsync(temporaryPath, cancellationToken);
+                    File.Move(temporaryPath, targetPath);
+                    targetCreated = true;
 
-                _databasePath = targetPath;
-                _connectionString = BuildConnectionString(_databasePath);
-                await InitializeCoreAsync(cancellationToken);
+                    // The old database remains intact until the new path is persisted and opened.
+                    persistNewPath?.Invoke(targetPath);
+                    pathPersisted = persistNewPath is not null;
+                    _databasePath = targetPath;
+                    _connectionString = BuildConnectionString(_databasePath);
+                    try
+                    {
+                        await InitializeCoreAsync(cancellationToken);
+                    }
+                    catch
+                    {
+                        _databasePath = sourcePath;
+                        _connectionString = BuildConnectionString(sourcePath);
+                        _ftsAvailable = sourceFtsAvailable;
+                        throw;
+                    }
+                }
+                finally
+                {
+                    DeleteCheckpointSidecar(temporaryPath);
+                    DeleteCheckpointSidecar(temporaryPath + "-wal");
+                    DeleteCheckpointSidecar(temporaryPath + "-shm");
+                    if (targetCreated && !pathPersisted &&
+                        !string.Equals(_databasePath, targetPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        TryDeleteDatabaseFiles(targetPath);
+                    }
+                }
+
+                var previousDatabaseRemoved = TryDeleteDatabaseFiles(sourcePath);
+                return previousDatabaseRemoved;
             }
             finally
             {
@@ -798,6 +834,28 @@ public sealed class RecentDatabase : IDisposable
         {
             // The main database is already checkpointed and safely moved.
         }
+    }
+
+    private static bool TryDeleteDatabaseFiles(string databasePath)
+    {
+        var succeeded = true;
+        foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException)
+            {
+                succeeded = false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                succeeded = false;
+            }
+        }
+
+        return succeeded;
     }
 
     private static async Task ValidateFindHistoryDatabaseAsync(string databasePath,

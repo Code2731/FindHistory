@@ -461,43 +461,35 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         IsBusy = true;
         StatusText = "데이터베이스를 새 위치로 이동하는 중…";
-        var previousPath = _database.DatabasePath;
         try
         {
             var destinationPath = Path.Combine(destinationDirectory, "findhistory.db");
-            _settings.SetDatabasePath(destinationPath);
-            await _database.MoveToAsync(destinationPath);
+            var previousDatabaseRemoved = await _database.MoveToAsync(destinationPath, _settings.SetDatabasePath);
             NotifyDatabaseLocationChanged();
-            await LoadAsync(CancellationToken.None);
-            await LoadActivityAsync(CancellationToken.None);
-            StatusText = "데이터베이스와 기존 기록을 새 위치로 이동했습니다.";
+            try
+            {
+                await LoadAsync(CancellationToken.None);
+                await LoadActivityAsync(CancellationToken.None);
+            }
+            catch (Exception refreshException)
+            {
+                _log.Error("Database moved, but the UI refresh failed.", refreshException);
+                StatusText = $"DB를 새 위치로 옮겼지만 화면 갱신에 실패했습니다: {refreshException.Message}";
+                return true;
+            }
+
+            StatusText = previousDatabaseRemoved
+                ? "데이터베이스와 기존 기록을 새 위치로 이동했습니다."
+                : "데이터베이스 이동은 완료했지만 이전 위치의 파일을 정리하지 못했습니다. 이전 DB 사본은 보존되어 있습니다.";
             return true;
         }
         catch (Exception ex)
         {
             _log.Error("Database move failed.", ex);
-            string? rollbackError = null;
-            if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    await _database.MoveToAsync(previousPath);
-                }
-                catch (Exception rollbackException)
-                {
-                    rollbackError = rollbackException.Message;
-                    _log.Error("Database move rollback failed.", rollbackException);
-                }
-            }
-
             var actualPath = _database.DatabasePath;
             var settingsRestored = TryRestoreSettingsPath(actualPath);
             NotifyDatabaseLocationChanged();
             var recoveryDetails = new List<string>();
-            if (rollbackError is not null)
-            {
-                recoveryDetails.Add($"DB 원복 실패: {rollbackError}");
-            }
             if (!settingsRestored)
             {
                 recoveryDetails.Add("DB 경로 설정 저장 실패");
