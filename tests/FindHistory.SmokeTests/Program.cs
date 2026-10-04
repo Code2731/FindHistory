@@ -479,7 +479,56 @@ try
     Assert(new AppSettingsService(settingsPath).SavedSearches.Count == 0,
         "저장 검색 삭제가 설정 파일에 반영되지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장/복원/내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정, 실시간 감시");
+    var dateRangeOptions = new DateRangeOption[]
+    {
+        new("전체 기간"), new("오늘", 1), new("최근 7일", 7), new("특정 날짜", IsSpecificDate: true)
+    };
+    var unsupportedSavedRange = savedSearch with { CalendarDayCount = 14 };
+    Assert(SavedSearchDateRangeResolver.Resolve(unsupportedSavedRange, dateRangeOptions) == dateRangeOptions[0],
+        "지원하지 않는 저장 검색 기간이 전체 기간으로 안전하게 대체되지 않았습니다.");
+    var restoredSavedRange = SavedSearchDateRangeResolver.Resolve(savedSearch, dateRangeOptions);
+    Assert(restoredSavedRange.CalendarDayCount == 7,
+        "지원되는 저장 검색 기간을 다시 선택하지 못했습니다.");
+
+    var blockedSettingsPath = Path.Combine(testRoot, "blocked-settings.json");
+    var blockedSettings = new AppSettingsService(blockedSettingsPath);
+    var originalConfiguredPath = blockedSettings.DatabasePath;
+    Directory.CreateDirectory(blockedSettingsPath);
+    await AssertThrowsAsync(
+        () => Task.Run(() => blockedSettings.SetDatabasePath(movedPath)),
+        "설정 저장 실패를 감지하지 못했습니다.");
+    Assert(string.Equals(blockedSettings.DatabasePath, originalConfiguredPath, StringComparison.OrdinalIgnoreCase),
+        "설정 저장 실패 후 메모리의 DB 경로가 디스크와 달라졌습니다.");
+    var blockedSearch = savedSearch with { Id = Guid.NewGuid() };
+    await AssertThrowsAsync(
+        () => Task.Run(() => blockedSettings.AddSavedSearch(blockedSearch)),
+        "저장 검색 설정 저장 실패를 감지하지 못했습니다.");
+    Assert(blockedSettings.SavedSearches.Count == 0,
+        "저장 검색 설정 저장 실패 후 메모리 목록이 디스크와 달라졌습니다.");
+
+    var settingsWithSearchPath = Path.Combine(testRoot, "settings-with-search.json");
+    var settingsWithSearch = new AppSettingsService(settingsWithSearchPath);
+    Assert(settingsWithSearch.AddSavedSearch(savedSearch), "설정 쓰기 실패 테스트의 준비에 실패했습니다.");
+    File.Delete(settingsWithSearchPath);
+    Directory.CreateDirectory(settingsWithSearchPath);
+    await AssertThrowsAsync(
+        () => Task.Run(() => settingsWithSearch.RemoveSavedSearch(savedSearch.Id)),
+        "저장 검색 삭제의 설정 쓰기 실패를 감지하지 못했습니다.");
+    Assert(settingsWithSearch.SavedSearches.Count == 1,
+        "저장 검색 삭제 실패 후 메모리 목록만 먼저 바뀌었습니다.");
+
+    var invalidSettingsPath = Path.Combine(testRoot, "invalid-settings.json");
+    await File.WriteAllTextAsync(invalidSettingsPath, "{");
+    await AssertThrowsAsync(
+        () => Task.Run(() => new AppSettingsService(invalidSettingsPath)),
+        "손상된 설정 파일을 조용히 기본 설정으로 대체했습니다.");
+    var inaccessibleSettingsPath = Path.Combine(testRoot, "settings-is-a-directory.json");
+    Directory.CreateDirectory(inaccessibleSettingsPath);
+    await AssertThrowsAsync(
+        () => Task.Run(() => new AppSettingsService(inaccessibleSettingsPath)),
+        "읽을 수 없는 설정 경로를 기본 DB 경로로 조용히 대체했습니다.");
+
+    Console.WriteLine("PASS: 로그, 저장/복원/내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시");
 }
 finally
 {

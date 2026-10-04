@@ -93,14 +93,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 if (value.IsSpecificDate)
                 {
                     SpecificDate = value.SpecificDate ?? DateTime.Today;
-                    SelectedDateRange = DateRanges.First(option => option.IsSpecificDate);
                 }
-                else
-                {
-                    SelectedDateRange = value.CalendarDayCount is null
-                        ? DateRanges[0]
-                        : DateRanges.First(option => option.CalendarDayCount == value.CalendarDayCount);
-                }
+                SelectedDateRange = SavedSearchDateRangeResolver.Resolve(value, DateRanges);
             }
             finally
             {
@@ -482,15 +476,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         catch (Exception ex)
         {
             _log.Error("Database move failed.", ex);
+            string? rollbackError = null;
             if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
             {
-                await _database.MoveToAsync(previousPath);
+                try
+                {
+                    await _database.MoveToAsync(previousPath);
+                }
+                catch (Exception rollbackException)
+                {
+                    rollbackError = rollbackException.Message;
+                    _log.Error("Database move rollback failed.", rollbackException);
+                }
             }
 
-            var restored = TryRestoreSettingsPath(previousPath);
-            StatusText = restored
-                ? $"데이터베이스 이동 실패: {ex.Message}"
-                : $"데이터베이스 이동 실패: {ex.Message} (설정 복원도 실패했습니다)";
+            var actualPath = _database.DatabasePath;
+            var settingsRestored = TryRestoreSettingsPath(actualPath);
+            NotifyDatabaseLocationChanged();
+            var recoveryDetails = new List<string>();
+            if (rollbackError is not null)
+            {
+                recoveryDetails.Add($"DB 원복 실패: {rollbackError}");
+            }
+            if (!settingsRestored)
+            {
+                recoveryDetails.Add("DB 경로 설정 저장 실패");
+            }
+            StatusText = $"데이터베이스 이동 실패: {ex.Message}" +
+                         (recoveryDetails.Count == 0
+                             ? string.Empty
+                             : $" ({string.Join("; ", recoveryDetails)}). 현재 DB 경로: {actualPath}");
             return false;
         }
         finally
@@ -598,11 +613,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         IsBusy = true;
         StatusText = "선택한 데이터베이스를 확인하는 중…";
         var previousPath = _database.DatabasePath;
-        var settingsUpdateAttempted = false;
         try
         {
             await _database.UseAsync(databasePath);
-            settingsUpdateAttempted = true;
             _settings.SetDatabasePath(_database.DatabasePath);
             NotifyDatabaseLocationChanged();
             await LoadAsync(CancellationToken.None);
@@ -613,26 +626,36 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         catch (Exception ex)
         {
             _log.Error("Database switch failed.", ex);
-            var restored = true;
+            string? rollbackError = null;
             if (!string.Equals(_database.DatabasePath, previousPath, StringComparison.OrdinalIgnoreCase))
             {
                 try
                 {
                     await _database.UseAsync(previousPath);
                 }
-                catch (Exception)
+                catch (Exception rollbackException)
                 {
-                    restored = false;
+                    rollbackError = rollbackException.Message;
+                    _log.Error("Database switch rollback failed.", rollbackException);
                 }
             }
 
-            if (settingsUpdateAttempted)
+            var actualPath = _database.DatabasePath;
+            var settingsRestored = TryRestoreSettingsPath(actualPath);
+            NotifyDatabaseLocationChanged();
+            var recoveryDetails = new List<string>();
+            if (rollbackError is not null)
             {
-                restored &= TryRestoreSettingsPath(previousPath);
+                recoveryDetails.Add($"DB 원복 실패: {rollbackError}");
             }
-            StatusText = restored
-                ? $"데이터베이스를 열 수 없습니다: {ex.Message}"
-                : $"데이터베이스를 열 수 없습니다: {ex.Message} (이전 설정 복원도 실패했습니다)";
+            if (!settingsRestored)
+            {
+                recoveryDetails.Add("DB 경로 설정 저장 실패");
+            }
+            StatusText = $"데이터베이스를 열 수 없습니다: {ex.Message}" +
+                         (recoveryDetails.Count == 0
+                             ? string.Empty
+                             : $" ({string.Join("; ", recoveryDetails)}). 현재 DB 경로: {actualPath}");
             return false;
         }
         finally
@@ -773,6 +796,30 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             catch (OperationCanceledException)
             {
                 // A newer search superseded this one.
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Scheduled search refresh failed.", ex);
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher is null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await dispatcher.InvokeAsync(() =>
+                    {
+                        if (!_disposed && !token.IsCancellationRequested)
+                        {
+                            StatusText = $"검색 실패: {ex.Message}";
+                        }
+                    }).Task;
+                }
+                catch (Exception dispatchException)
+                {
+                    _log.Error("Could not report the search refresh failure to the UI.", dispatchException);
+                }
             }
         }, token);
     }

@@ -14,6 +14,7 @@ public sealed class RecentDatabase : IDisposable
     private string _databasePath;
     private bool _ftsAvailable;
     private readonly SemaphoreSlim _databaseGate = new(1, 1);
+    private readonly SemaphoreSlim _databasePathGate = new(1, 1);
     private int _disposeState;
 
     private const string UpsertSql = """
@@ -56,9 +57,12 @@ public sealed class RecentDatabase : IDisposable
             return;
         }
 
-        // 진행 중인 읽기/쓰기가 gate를 반환한 뒤에만 SemaphoreSlim을 폐기한다.
+        // 일반 DB 작업과 경로를 고정한 읽기 내보내기가 모두 끝난 뒤 gate를 폐기한다.
         _databaseGate.Wait();
+        _databasePathGate.Wait();
+        _databasePathGate.Release();
         _databaseGate.Release();
+        _databasePathGate.Dispose();
         _databaseGate.Dispose();
     }
 
@@ -305,9 +309,10 @@ public sealed class RecentDatabase : IDisposable
             throw new ArgumentOutOfRangeException(nameof(format), "내보내기 형식은 CSV 또는 JSON이어야 합니다.");
         }
 
-        await _databaseGate.WaitAsync(cancellationToken);
+        await _databasePathGate.WaitAsync(cancellationToken);
         try
         {
+            ThrowIfDisposed();
             if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
             {
                 throw new IOException("내보내기 파일은 현재 데이터베이스와 다른 경로여야 합니다.");
@@ -317,7 +322,15 @@ public sealed class RecentDatabase : IDisposable
             var temporaryPath = targetPath + $".{Guid.NewGuid():N}.tmp";
             try
             {
-                await using var connection = await OpenAsync(cancellationToken);
+                var readOnlyConnectionString = new SqliteConnectionStringBuilder
+                {
+                    DataSource = _databasePath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Private,
+                    Pooling = false
+                }.ToString();
+                await using var connection = new SqliteConnection(readOnlyConnectionString);
+                await connection.OpenAsync(cancellationToken);
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.Transaction = (SqliteTransaction)transaction;
@@ -354,7 +367,7 @@ public sealed class RecentDatabase : IDisposable
         }
         finally
         {
-            _databaseGate.Release();
+            _databasePathGate.Release();
         }
     }
 
@@ -396,6 +409,7 @@ public sealed class RecentDatabase : IDisposable
         using var writer = new Utf8JsonWriter(output, new JsonWriterOptions
         {
             Indented = true,
+            // This encoder is for a standalone JSON data file. HTML embedding needs context-aware encoding.
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
         });
         var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -566,26 +580,34 @@ public sealed class RecentDatabase : IDisposable
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
-            if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
+            await _databasePathGate.WaitAsync(cancellationToken);
+            try
             {
-                return;
+                if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+                if (File.Exists(targetPath))
+                {
+                    throw new IOException("선택한 위치에 findhistory.db가 이미 있습니다.");
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                await CheckpointAsync(cancellationToken);
+
+                var sourcePath = _databasePath;
+                File.Move(sourcePath, targetPath);
+                DeleteCheckpointSidecar(sourcePath + "-wal");
+                DeleteCheckpointSidecar(sourcePath + "-shm");
+
+                _databasePath = targetPath;
+                _connectionString = BuildConnectionString(_databasePath);
+                await InitializeCoreAsync(cancellationToken);
             }
-            if (File.Exists(targetPath))
+            finally
             {
-                throw new IOException("선택한 위치에 findhistory.db가 이미 있습니다.");
+                _databasePathGate.Release();
             }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            await CheckpointAsync(cancellationToken);
-
-            var sourcePath = _databasePath;
-            File.Move(sourcePath, targetPath);
-            DeleteCheckpointSidecar(sourcePath + "-wal");
-            DeleteCheckpointSidecar(sourcePath + "-shm");
-
-            _databasePath = targetPath;
-            _connectionString = BuildConnectionString(_databasePath);
-            await InitializeCoreAsync(cancellationToken);
         }
         finally
         {
@@ -637,43 +659,51 @@ public sealed class RecentDatabase : IDisposable
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
-            if (string.Equals(sourcePath, _databasePath, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new IOException("현재 데이터베이스 파일 자체는 복원 원본으로 선택할 수 없습니다.");
-            }
-
-            await ValidateFindHistoryDatabaseAsync(sourcePath, cancellationToken);
-            var directory = Path.GetDirectoryName(_databasePath)!;
-            var stagedPath = Path.Combine(directory, $"findhistory-restore-{Guid.NewGuid():N}.tmp");
-            var safetyPath = _databasePath + $".before-restore-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.bak";
+            await _databasePathGate.WaitAsync(cancellationToken);
             try
             {
-                await BackupDatabaseFileAsync(sourcePath, stagedPath, cancellationToken);
-                await ValidateFindHistoryDatabaseAsync(stagedPath, cancellationToken);
-                await CheckpointAsync(cancellationToken);
-                await BackupDatabaseFileAsync(_databasePath, safetyPath, cancellationToken);
-                File.Move(stagedPath, _databasePath, overwrite: true);
-                DeleteCheckpointSidecar(_databasePath + "-wal");
-                DeleteCheckpointSidecar(_databasePath + "-shm");
+                if (string.Equals(sourcePath, _databasePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException("현재 데이터베이스 파일 자체는 복원 원본으로 선택할 수 없습니다.");
+                }
+
+                await ValidateFindHistoryDatabaseAsync(sourcePath, cancellationToken);
+                var directory = Path.GetDirectoryName(_databasePath)!;
+                var stagedPath = Path.Combine(directory, $"findhistory-restore-{Guid.NewGuid():N}.tmp");
+                var safetyPath = _databasePath + $".before-restore-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.bak";
                 try
                 {
-                    await InitializeCoreAsync(cancellationToken);
-                }
-                catch
-                {
+                    await BackupDatabaseFileAsync(sourcePath, stagedPath, cancellationToken);
+                    await ValidateFindHistoryDatabaseAsync(stagedPath, cancellationToken);
+                    await CheckpointAsync(cancellationToken);
+                    await BackupDatabaseFileAsync(_databasePath, safetyPath, cancellationToken);
+                    File.Move(stagedPath, _databasePath, overwrite: true);
                     DeleteCheckpointSidecar(_databasePath + "-wal");
                     DeleteCheckpointSidecar(_databasePath + "-shm");
-                    File.Copy(safetyPath, _databasePath, overwrite: true);
-                    await InitializeCoreAsync(cancellationToken);
-                    throw;
+                    try
+                    {
+                        await InitializeCoreAsync(cancellationToken);
+                    }
+                    catch
+                    {
+                        DeleteCheckpointSidecar(_databasePath + "-wal");
+                        DeleteCheckpointSidecar(_databasePath + "-shm");
+                        File.Copy(safetyPath, _databasePath, overwrite: true);
+                        await InitializeCoreAsync(cancellationToken);
+                        throw;
+                    }
+                    return safetyPath;
                 }
-                return safetyPath;
+                finally
+                {
+                    DeleteCheckpointSidecar(stagedPath);
+                    DeleteCheckpointSidecar(stagedPath + "-wal");
+                    DeleteCheckpointSidecar(stagedPath + "-shm");
+                }
             }
             finally
             {
-                DeleteCheckpointSidecar(stagedPath);
-                DeleteCheckpointSidecar(stagedPath + "-wal");
-                DeleteCheckpointSidecar(stagedPath + "-shm");
+                _databasePathGate.Release();
             }
         }
         finally
@@ -718,22 +748,30 @@ public sealed class RecentDatabase : IDisposable
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
-            await ValidateFindHistoryDatabaseAsync(targetPath, cancellationToken);
-            var previousPath = _databasePath;
-            var previousConnectionString = _connectionString;
-            var previousFtsAvailable = _ftsAvailable;
-            _databasePath = targetPath;
-            _connectionString = BuildConnectionString(_databasePath);
+            await _databasePathGate.WaitAsync(cancellationToken);
             try
             {
-                await InitializeCoreAsync(cancellationToken);
+                await ValidateFindHistoryDatabaseAsync(targetPath, cancellationToken);
+                var previousPath = _databasePath;
+                var previousConnectionString = _connectionString;
+                var previousFtsAvailable = _ftsAvailable;
+                _databasePath = targetPath;
+                _connectionString = BuildConnectionString(_databasePath);
+                try
+                {
+                    await InitializeCoreAsync(cancellationToken);
+                }
+                catch
+                {
+                    _databasePath = previousPath;
+                    _connectionString = previousConnectionString;
+                    _ftsAvailable = previousFtsAvailable;
+                    throw;
+                }
             }
-            catch
+            finally
             {
-                _databasePath = previousPath;
-                _connectionString = previousConnectionString;
-                _ftsAvailable = previousFtsAvailable;
-                throw;
+                _databasePathGate.Release();
             }
         }
         finally

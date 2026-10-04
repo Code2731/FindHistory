@@ -48,8 +48,20 @@ public partial class StorageSettingsWindow : Window
         }
 
         IsEnabled = false;
-        var succeeded = await _viewModel.MoveDatabaseAsync(dialog.SelectedPath);
-        IsEnabled = true;
+        var succeeded = false;
+        try
+        {
+            succeeded = await _viewModel.MoveDatabaseAsync(dialog.SelectedPath);
+        }
+        catch (Exception ex)
+        {
+            System.Windows.MessageBox.Show($"데이터베이스 이동 중 오류가 발생했습니다.\n\n{ex.Message}",
+                "DB 이동 실패", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            IsEnabled = true;
+        }
         if (succeeded)
         {
             System.Windows.MessageBox.Show("기존 기록을 새 위치로 이동했습니다.", "이동 완료",
@@ -74,9 +86,26 @@ public partial class StorageSettingsWindow : Window
         }
 
         IsEnabled = false;
-        var succeeded = await _viewModel.UseDatabaseAsync(dialog.FileName);
-        IsEnabled = true;
-        if (!succeeded)
+        var succeeded = false;
+        string? operationError = null;
+        try
+        {
+            succeeded = await _viewModel.UseDatabaseAsync(dialog.FileName);
+        }
+        catch (Exception ex)
+        {
+            operationError = ex.Message;
+        }
+        finally
+        {
+            IsEnabled = true;
+        }
+        if (operationError is not null)
+        {
+            System.Windows.MessageBox.Show($"데이터베이스 전환 중 오류가 발생했습니다.\n\n{operationError}",
+                "DB 열기 실패", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        else if (!succeeded)
         {
             System.Windows.MessageBox.Show("선택한 파일을 FindHistory DB로 열 수 없습니다.", "DB 열기 실패",
                 MessageBoxButton.OK, MessageBoxImage.Warning);

@@ -21,8 +21,9 @@ public sealed class AppSettingsService
     public void SetDatabasePath(string databasePath)
     {
         var fullPath = Path.GetFullPath(databasePath);
-        _settings = _settings with { DatabasePath = fullPath };
-        Save(_settings);
+        var updatedSettings = _settings with { DatabasePath = fullPath };
+        Save(updatedSettings);
+        _settings = updatedSettings;
     }
 
     public IReadOnlyList<SavedSearch> SavedSearches => _settings.SavedSearches;
@@ -36,8 +37,9 @@ public sealed class AppSettingsService
         }
 
         searches.Add(savedSearch);
-        _settings = _settings with { SavedSearches = searches };
-        Save(_settings);
+        var updatedSettings = _settings with { SavedSearches = searches };
+        Save(updatedSettings);
+        _settings = updatedSettings;
         return true;
     }
 
@@ -49,27 +51,27 @@ public sealed class AppSettingsService
             return;
         }
 
-        _settings = _settings with { SavedSearches = searches };
-        Save(_settings);
+        var updatedSettings = _settings with { SavedSearches = searches };
+        Save(updatedSettings);
+        _settings = updatedSettings;
     }
 
     private AppSettings Load()
     {
         try
         {
-            if (!File.Exists(_settingsPath))
-            {
-                return new AppSettings(null);
-            }
-
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_settingsPath))
-                   ?? new AppSettings(null);
+            using var stream = new FileStream(_settingsPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var settings = JsonSerializer.Deserialize<AppSettings>(stream)
+                           ?? throw new InvalidDataException("설정 파일이 비어 있거나 유효하지 않습니다.");
+            return settings.SavedSearches is null
+                ? settings with { SavedSearches = [] }
+                : settings;
         }
-        catch (JsonException)
+        catch (FileNotFoundException)
         {
             return new AppSettings(null);
         }
-        catch (IOException)
+        catch (DirectoryNotFoundException)
         {
             return new AppSettings(null);
         }

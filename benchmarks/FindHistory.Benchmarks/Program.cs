@@ -5,8 +5,9 @@ using Microsoft.Data.Sqlite;
 
 var recentOnly = args.Any(arg => arg.Equals("--recent-only", StringComparison.OrdinalIgnoreCase));
 var contentionOnly = args.Any(arg => arg.Equals("--contention-only", StringComparison.OrdinalIgnoreCase));
+var exportContentionOnly = args.Any(arg => arg.Equals("--export-contention-only", StringComparison.OrdinalIgnoreCase));
 var countArguments = args.Where(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToArray();
-var counts = recentOnly || contentionOnly
+var counts = recentOnly || contentionOnly || exportContentionOnly
     ? []
     : countArguments.Length == 0
     ? new[] { 10_000, 100_000, 1_000_000 }
@@ -23,6 +24,10 @@ try
     if (contentionOnly)
     {
         await MeasureDatabaseContentionAsync(benchmarkRoot);
+    }
+    else if (exportContentionOnly)
+    {
+        await MeasureExportContentionAsync(benchmarkRoot);
     }
     else
     {
@@ -163,6 +168,60 @@ static async Task MeasureDatabaseContentionAsync(string root)
                           $"anchor {foundAnchor} | {(error ?? writeError ?? "ok")} | " +
                           $"write {writeTimer.Elapsed.TotalMilliseconds:N1} ms");
     }
+}
+
+static async Task MeasureExportContentionAsync(string root)
+{
+    const int itemCount = 100_000;
+    const int iterations = 3;
+    var databasePath = Path.Combine(root, "export-contention", "findhistory.db");
+    var database = new RecentDatabase(databasePath);
+    await database.InitializeAsync();
+    var seedTime = await SeedAsync(databasePath, itemCount);
+    var outputDirectory = Path.Combine(root, "exports");
+    Directory.CreateDirectory(outputDirectory);
+    var exportPath = Path.Combine(outputDirectory, "history.json");
+    var exportTimes = new double[iterations];
+    var queuedSearchTimes = new double[iterations];
+    Console.WriteLine($"EXPORT CONTENTION | {itemCount:N0} items | seed {seedTime.TotalSeconds:N2} s | " +
+                      $"DB {FormatBytes(GetDatabaseSize(databasePath))}");
+
+    for (var iteration = 0; iteration < iterations; iteration++)
+    {
+        var exportTimer = Stopwatch.StartNew();
+        var exportTask = Task.Run(() => database.ExportToAsync(exportPath, "json"));
+        var exportStarted = false;
+        for (var attempt = 0; attempt < 30_000 && !exportTask.IsCompleted; attempt++)
+        {
+            if (Directory.EnumerateFiles(outputDirectory, "*.tmp").Any())
+            {
+                exportStarted = true;
+                break;
+            }
+            await Task.Delay(1);
+        }
+        if (!exportStarted)
+        {
+            await exportTask;
+            throw new InvalidOperationException("Export temp file was not observed during the benchmark.");
+        }
+
+        var searchTimer = Stopwatch.StartNew();
+        await database.SearchAsync("report_050000", null);
+        searchTimer.Stop();
+        await exportTask;
+        exportTimer.Stop();
+        exportTimes[iteration] = exportTimer.Elapsed.TotalMilliseconds;
+        queuedSearchTimes[iteration] = searchTimer.Elapsed.TotalMilliseconds;
+        Console.WriteLine($"  run {iteration + 1} | export {exportTimes[iteration]:N1} ms | " +
+                          $"queued search {queuedSearchTimes[iteration]:N1} ms");
+    }
+
+    Array.Sort(exportTimes);
+    Array.Sort(queuedSearchTimes);
+    Console.WriteLine($"  export median | {exportTimes[iterations / 2]:N1} ms");
+    Console.WriteLine($"  queued search median | {queuedSearchTimes[iterations / 2]:N1} ms");
+    Console.WriteLine($"  JSON size | {FormatBytes(new FileInfo(exportPath).Length)}");
 }
 
 static async Task MeasureRecentFolderAsync(string root)

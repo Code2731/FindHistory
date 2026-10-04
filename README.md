@@ -159,6 +159,12 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --contention-only
 ```
 
+10만 건 JSON 내보내기 중 검색 대기를 측정하려면:
+
+```powershell
+dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --export-contention-only
+```
+
 현재 최적화된 기준 구현은 10만 건 DB에서 최신 1,000건 조회 약 **4.21 ms**, `*.pdf` 1,000건 조회 약 **6.10 ms**, 최근 7일 이벤트 1,000건 조회 약 **13.42 ms**를 기록했습니다. 수치는 개발 환경에 따라 달라지며, 측정 방법과 100만 건 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 정리되어 있습니다.
 
 다음 개발 단계와 완료 조건은 [개발 로드맵](docs/ROADMAP.md)에서 확인할 수 있습니다.
@@ -309,6 +315,12 @@ Run the benchmark suite with:
 
 ```powershell
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release
+```
+
+Measure search latency during a 100,000-item JSON export with:
+
+```powershell
+dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --export-contention-only
 ```
 
 On the current development setup, the optimized implementation measured approximately **4.21 ms** for the newest 1,000 rows in a 100,000-row database, **6.10 ms** for 1,000 `*.pdf` results, and **13.42 ms** for 1,000 events from the last seven days. Results vary by machine. See the [performance report](docs/PERFORMANCE_2026-09-24.md) for the methodology and 1-million-row results.
