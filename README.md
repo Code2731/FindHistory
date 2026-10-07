@@ -124,11 +124,13 @@ dotnet publish -c Release --self-contained false -o publish
 
 메인 화면의 **데이터 저장소**에서 기록을 유지한 채 DB를 다른 폴더로 옮기거나, 다른 위치의 기존 `findhistory.db`를 선택할 수 있습니다. DB는 실행 파일과 별도로 유지되므로 앱을 업데이트하거나 게시 폴더를 교체해도 기록이 남습니다.
 
-같은 화면에서 전체 기록을 CSV 또는 JSON으로 내보낼 수 있습니다. 두 형식 모두 파일별 요약과 개별 열기 이력을 포함하며, CSV는 Excel에서 수식으로 실행될 수 있는 값에 안전 접두사를 붙입니다. 현재 검색 조건만 내보내는 기능은 별도 작업으로 남아 있습니다.
+같은 화면에서 전체 기록을 CSV 또는 JSON으로 내보낼 수 있습니다. **현재 결과 CSV/JSON**은 현재 검색어·확장자·존재 상태·폴더·날짜 조건에 맞는 전체 기록을 내보냅니다. 화면의 1,000개 표시 제한은 적용하지 않습니다. 날짜를 선택하면 해당 기간의 열기 이벤트만 포함합니다. 파일별 요약의 최초·최종 기록 시각과 누적 횟수는 전체 기간 값입니다. 날짜를 선택하지 않으면 일치하는 항목의 전체 열기 이력을 포함합니다. 빈 결과도 유효한 빈 JSON 또는 헤더만 있는 CSV로 저장합니다. JSON에는 검색 조건과 이력 범위 설명을 포함합니다. CSV는 Excel에서 수식으로 실행될 수 있는 값에 안전 접두사를 붙입니다.
 
 같은 화면의 **백업 저장**은 SQLite 온라인 백업으로 일관된 백업 파일을 만듭니다. **백업 복원**은 유효한 FindHistory DB인지 먼저 검사하고, 현재 데이터베이스를 고유한 안전 사본으로 보관한 뒤 선택한 백업으로 복원합니다. 백업은 앱 설정 파일과 별개이므로, 저장된 검색 조건을 함께 보존하려면 `%LocalAppData%\FindHistory\settings.json`도 별도로 복사하세요.
 
 **자동 백업 사용**을 켜면 앱 실행 중 로컬 날짜 기준 하루에 한 번 백업합니다. 기본값은 꺼짐이며 보관 개수는 DB별 1~30개입니다. 설정 변경은 1분 이내에 적용됩니다. 백업은 `%LocalAppData%\FindHistory\Backups`에 저장됩니다. 보관 개수를 넘으면 해당 DB의 오래된 자동 백업만 삭제합니다. 수동 백업과 복원 전 안전 사본은 삭제하지 않습니다. DB 위치를 바꾸면 별도의 백업 목록으로 관리합니다. 자동 백업도 **백업 복원**으로 복원할 수 있습니다. 같은 드라이브의 백업은 드라이브 고장에 대비할 수 없으므로 필요한 백업은 외장 드라이브에도 복사하세요.
+
+**저장 공간**은 DB·WAL·SHM 파일 크기와 DB 내부의 할당 공간·빈 페이지 크기를 표시합니다. 백업 파일은 합계에 포함하지 않습니다. 값은 조회 시점의 크기입니다. **다시 계산**으로 갱신할 수 있습니다. **공간 정리**는 SQLite `VACUUM`으로 기록을 유지한 채 빈 공간을 회수합니다. 빈 페이지 크기는 예상 회수량이며 실제 파일 감소량과 다를 수 있습니다. 작업 중 검색·수집·내보내기는 대기합니다. 작업에는 추가 디스크 공간이 필요할 수 있습니다. 다른 프로그램이 DB를 사용 중이면 작업이 실패할 수 있습니다. 날짜별 기록 삭제는 아직 제공하지 않습니다.
 
 검색 조건을 설정한 뒤 **검색 저장**을 눌러 이름을 지정하면 로컬 설정에 저장됩니다. 저장 검색 목록에서 조건을 다시 적용하거나 선택 삭제할 수 있습니다. 최근 7일 같은 상대 기간은 불러온 시점을 기준으로 계산하고, 날짜 지정 검색은 저장 당시 선택 날짜를 유지합니다.
 
@@ -295,7 +297,9 @@ Use **Data storage** on the main screen to move the database without losing exis
 
 Enable **automatic backups** to back up once per local calendar day while the app runs. This option is off by default. Keep 1–30 backups per database. Settings apply within one minute. Backups are saved in `%LocalAppData%\FindHistory\Backups`. Only the oldest automatic backups for that database are pruned. Manual backups and pre-restore safety copies are kept. Changing the database path starts a separate backup set. Use **Restore Backup** to restore an automatic backup. A backup on the same drive does not protect against drive failure. Copy important backups to an external drive as well.
 
-Export the complete history as CSV or JSON from **Data storage**. Both formats include item summaries and individual open events. CSV prefixes spreadsheet formula-like values for safer opening in Excel. Exporting only the current search results is not yet supported.
+**Storage space** shows DB, WAL, and SHM file sizes, allocated database space, and free pages. Backup files are excluded. Values are a snapshot; use **Refresh sizes** to update them. **Compact database** uses SQLite `VACUUM` to reclaim space without deleting history. Free pages indicate estimated reclaimable space; the actual file reduction can differ. Search, capture, and export wait during compaction. Extra disk space may be required. Compaction can fail if another program is using the database. Deleting history by date is not supported yet.
+
+Export the complete history as CSV or JSON from **Data storage**. **Current results CSV/JSON** exports all matches for the current search text, extension, existence status, folder, and date filters. The 1,000-item display limit does not apply. With a date filter, only events in that range are included. Item summary dates and open counts remain lifetime values. Without a date filter, all events for matching items are included. Empty results produce a valid empty JSON list or a header-only CSV. JSON includes the selection and event scope. CSV prefixes spreadsheet formula-like values for safer opening in Excel.
 
 Set the desired conditions and choose **Save Search** to name and store them in local settings. Select a saved search to apply it again or delete the selected entry. Relative periods such as Last 7 days are recalculated when applied; a specific date keeps the date selected when it was saved.
 

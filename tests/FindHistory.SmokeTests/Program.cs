@@ -332,6 +332,74 @@ try
         "빈 검색 결과 내보내기를 거부하지 않았습니다.");
 
     var preBackupItemCount = (await database.GetStatsAsync()).UniqueItems;
+    var filteredJsonExport = Path.Combine(testRoot, "exports", "filtered.json");
+    var filteredCsvExport = Path.Combine(testRoot, "exports", "filtered.csv");
+    var exportFilters = new HistoryFilters("*.TXT", false, Path.Combine(testRoot, "timeline"));
+    await database.ExportSearchToAsync(filteredJsonExport, "json", "boundary *.txt", boundaryRange, exportFilters);
+    await database.ExportSearchToAsync(filteredCsvExport, "csv", "boundary *.txt", boundaryRange, exportFilters);
+    using (var filteredDocument = JsonDocument.Parse(await File.ReadAllTextAsync(filteredJsonExport)))
+    {
+        var filteredItems = filteredDocument.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert(filteredItems.Length == 1 && filteredItems[0].GetProperty("openCount").GetInt32() == 3,
+            "필터 내보내기가 항목의 전체 기간 요약을 유지하지 못했습니다.");
+        var filteredEvents = filteredItems[0].GetProperty("events").EnumerateArray()
+            .Select(item => item.GetProperty("openedUtc").GetDateTimeOffset()).ToArray();
+        Assert(filteredEvents.SequenceEqual(new[] { boundaryStart, boundaryEnd.AddTicks(-1) }),
+            "필터 내보내기가 시작 포함·종료 제외 또는 선택 기간의 이력 규칙을 지키지 않았습니다.");
+        Assert(filteredDocument.RootElement.GetProperty("eventScope").GetString() == "selectedDateRange" &&
+               filteredDocument.RootElement.GetProperty("selection").GetProperty("searchText").GetString() == "boundary *.txt",
+            "JSON 내보내기에 날짜 범위와 검색 조건 설명이 없습니다.");
+    }
+    Assert((await File.ReadAllLinesAsync(filteredCsvExport)).Length == 3,
+        "날짜 필터 CSV가 선택 기간 밖의 이벤트를 포함했습니다.");
+    await database.ExportSearchToAsync(filteredJsonExport, "json", "daily-notes", null);
+    Assert((await ReadExportItemsAsync(filteredJsonExport)).Single().GetProperty("events").GetArrayLength() == 3,
+        "날짜 없는 검색 내보내기에 전체 열기 이력이 없습니다.");
+    foreach (var incompatibleFilters in new[]
+             {
+                 new HistoryFilters("pdf"), new HistoryFilters(Exists: true),
+                 new HistoryFilters(Folder: Path.Combine(testRoot, "time"))
+             })
+    {
+        await database.ExportSearchToAsync(filteredJsonExport, "json", "boundary", boundaryRange, incompatibleFilters);
+        Assert((await ReadExportItemsAsync(filteredJsonExport)).Length == 0,
+            "필터 내보내기가 확장자·존재 상태·폴더 조건을 무시했습니다.");
+    }
+    await database.ExportSearchToAsync(filteredJsonExport, "json", "missing-name", null);
+    Assert((await ReadExportItemsAsync(filteredJsonExport)).Length == 0,
+        "빈 검색 결과 JSON이 유효한 빈 목록이 아닙니다.");
+    await database.ExportSearchToAsync(filteredCsvExport, "csv", "missing-name", null);
+    Assert((await File.ReadAllLinesAsync(filteredCsvExport)).Length == 1,
+        "빈 검색 결과 CSV가 헤더만 저장하지 않았습니다.");
+    await File.WriteAllTextAsync(filteredJsonExport, "preserve previous export");
+    await AssertThrowsAsync(() => database.ExportSearchToAsync(filteredJsonExport, "json", "", null,
+        new HistoryFilters(Folder: "invalid\0folder")), "잘못된 내보내기 폴더 필터를 거부하지 않았습니다.");
+    Assert(await File.ReadAllTextAsync(filteredJsonExport) == "preserve previous export" &&
+           Directory.GetFiles(Path.GetDirectoryName(filteredJsonExport)!, "filtered.json.*.tmp").Length == 0,
+        "내보내기 실패가 기존 파일을 덮어쓰거나 임시 파일을 남겼습니다.");
+    await AssertThrowsAsync(() => database.ExportSearchToAsync(filteredJsonExport, "json", "",
+        new HistoryDateRange(boundaryEnd, boundaryStart, "invalid")),
+        "역순 날짜 범위 내보내기를 거부하지 않았습니다.");
+
+    await using (var bulkExportDatabase = new RecentDatabase(Path.Combine(testRoot, "bulk-export.db")))
+    {
+        await bulkExportDatabase.InitializeAsync();
+        var bulkExportFolder = Path.Combine(testRoot, "bulk%_export");
+        var bulkExportCandidates = Enumerable.Range(0, 1005).Select(index => new RecentItemCandidate(
+            Path.Combine(bulkExportFolder, $"bulk_{index:D4}.mp4"), $"bulk_{index:D4}.mp4", "MP4", "파일",
+            $"bulk-{index}.lnk", firstDay, false)).ToArray();
+        await bulkExportDatabase.UpsertManyAsync(bulkExportCandidates);
+        var bulkExportPath = Path.Combine(testRoot, "exports", "bulk.json");
+        Assert((await bulkExportDatabase.SearchAsync("*.mp4", null)).Count == 1000,
+            "대량 내보내기 테스트의 화면 표시 제한 준비가 실패했습니다.");
+        await bulkExportDatabase.ExportSearchToAsync(bulkExportPath, "json", "bulk *.MP4", null,
+            new HistoryFilters("mp4", false, bulkExportFolder));
+        Assert((await ReadExportItemsAsync(bulkExportPath)).Length == 1005,
+            "검색 내보내기가 표시 제한에 잘렸거나 폴더의 LIKE 문자를 올바르게 처리하지 못했습니다.");
+        await bulkExportDatabase.ExportSearchToAsync(bulkExportPath, "json", "bulk_000?.mp4", null);
+        Assert((await ReadExportItemsAsync(bulkExportPath)).Length == 10,
+            "필터 내보내기의 물음표 와일드카드가 검색과 다릅니다.");
+    }
     var backupPath = Path.Combine(testRoot, "backups", "findhistory.fhbackup");
     await database.BackupToAsync(backupPath);
     Assert(File.Exists(backupPath), "SQLite Backup API 백업 파일이 생성되지 않았습니다.");
@@ -842,6 +910,79 @@ try
         () => Task.Run(() => new AppSettingsService(inaccessibleSettingsPath)),
         "읽을 수 없는 설정 경로를 기본 DB 경로로 조용히 대체했습니다.");
 
+    var storageDatabasePath = Path.Combine(testRoot, "storage", "findhistory.db");
+    await using (var storageDatabase = new RecentDatabase(storageDatabasePath))
+    {
+        await storageDatabase.InitializeAsync();
+        var preservedFilePath = Path.Combine(testRoot, "preserved-storage-file.txt");
+        await File.WriteAllTextAsync(preservedFilePath, "original file stays intact");
+        await storageDatabase.UpsertAsync(new RecentItemCandidate(preservedFilePath,
+            "preserved-storage-file.txt", "TXT", "파일", "storage-source.lnk",
+            DateTimeOffset.UtcNow, true));
+        var storageDiagnosticsBefore = await storageDatabase.GetDiagnosticsAsync();
+        await using (var storageFixture = new Microsoft.Data.Sqlite.SqliteConnection(
+                         $"Data Source={storageDatabasePath};Pooling=False"))
+        {
+            await storageFixture.OpenAsync();
+            await using var storageCommand = storageFixture.CreateCommand();
+            // Generate free pages without deleting any application history.
+            storageCommand.CommandText = """
+                CREATE TABLE storage_test_waste (payload BLOB);
+                WITH RECURSIVE numbers(n) AS (
+                    SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 200
+                ) INSERT INTO storage_test_waste SELECT zeroblob(8192) FROM numbers;
+                DROP TABLE storage_test_waste;
+                """;
+            await storageCommand.ExecuteNonQueryAsync();
+        }
+        var storageBefore = await storageDatabase.GetStorageStatisticsAsync();
+        Assert(storageBefore.DatabasePath == storageDatabasePath && storageBefore.FreeBytes > 0 &&
+               storageBefore.AllocatedBytes >= storageBefore.FreeBytes && storageBefore.DatabaseBytes > 0 &&
+               storageBefore.TotalFileBytes == storageBefore.DatabaseBytes + storageBefore.WalBytes + storageBefore.SharedMemoryBytes,
+            "저장 공간 통계가 DB 파일과 빈 페이지를 올바르게 계산하지 못했습니다.");
+        await AssertThrowsAsync(() => storageDatabase.CompactAsync(Path.Combine(testRoot, "wrong-storage.db")),
+            "다른 DB 경로의 공간 정리를 거부하지 않았습니다.");
+        using (var cancelledCompaction = new CancellationTokenSource())
+        {
+            cancelledCompaction.Cancel();
+            await AssertThrowsAsync(() => storageDatabase.CompactAsync(storageDatabasePath, cancelledCompaction.Token),
+                "취소된 공간 정리 작업이 실행되었습니다.");
+        }
+        Assert((await storageDatabase.GetStorageStatisticsAsync()).FreeBytes == storageBefore.FreeBytes,
+            "거부되거나 취소된 공간 정리 작업이 DB를 변경했습니다.");
+        var storageAfter = await storageDatabase.CompactAsync(storageDatabasePath);
+        Assert(storageAfter.FreeBytes == 0 && storageAfter.AllocatedBytes < storageBefore.AllocatedBytes &&
+               storageAfter.DatabaseBytes < storageBefore.DatabaseBytes,
+            "공간 정리가 빈 페이지 또는 실제 DB 파일 크기를 줄이지 못했습니다.");
+        Assert((await storageDatabase.GetDiagnosticsAsync()) == storageDiagnosticsBefore,
+            "공간 정리가 기록 또는 통계를 변경했습니다.");
+        Assert((await storageDatabase.SearchAsync("preserved", null)).Count == 1 &&
+               (await storageDatabase.GetDailyActivityAsync(new HistoryDateRange(
+                   DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1), "storage test"))).Count == 1,
+            "공간 정리 후 검색 또는 날짜 기록이 유지되지 않았습니다.");
+        Assert(await File.ReadAllTextAsync(preservedFilePath) == "original file stays intact",
+            "공간 정리가 원본 파일을 변경했습니다.");
+        await using (var storageIntegrity = new Microsoft.Data.Sqlite.SqliteConnection(
+                         $"Data Source={storageDatabasePath};Pooling=False"))
+        {
+            await storageIntegrity.OpenAsync();
+            await using var integrityCommand = storageIntegrity.CreateCommand();
+            integrityCommand.CommandText = "PRAGMA integrity_check;";
+            Assert(string.Equals(Convert.ToString(await integrityCommand.ExecuteScalarAsync()), "ok"),
+                "공간 정리 후 DB 무결성 검사가 실패했습니다.");
+        }
+        await Task.WhenAll(storageDatabase.CompactAsync(storageDatabasePath),
+            storageDatabase.ExportToAsync(Path.Combine(testRoot, "compact-export.json"), "json"),
+            storageDatabase.SearchAsync("preserved", null));
+        Assert((await storageDatabase.GetDiagnosticsAsync()) == storageDiagnosticsBefore,
+            "동시 공간 정리·내보내기·검색이 기록을 변경했습니다.");
+        await storageDatabase.DisposeAsync();
+        await AssertThrowsAsync(() => storageDatabase.GetStorageStatisticsAsync(),
+            "종료된 DB의 저장 공간 조회를 거부하지 않았습니다.");
+        await AssertThrowsAsync(() => storageDatabase.CompactAsync(storageDatabasePath),
+            "종료된 DB의 공간 정리를 거부하지 않았습니다.");
+    }
+
     var disposalDatabase = new RecentDatabase(Path.Combine(testRoot, "dispose-race", "findhistory.db"));
     await disposalDatabase.InitializeAsync();
     var pendingReads = Enumerable.Range(0, 32)
@@ -875,6 +1016,12 @@ static void Assert(bool condition, string message)
     {
         throw new InvalidOperationException(message);
     }
+}
+
+static async Task<JsonElement[]> ReadExportItemsAsync(string path)
+{
+    using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
+    return document.RootElement.GetProperty("items").EnumerateArray().Select(item => item.Clone()).ToArray();
 }
 
 static async Task AssertThrowsAsync(Func<Task> action, string message)

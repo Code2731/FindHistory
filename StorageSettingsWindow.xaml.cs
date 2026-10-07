@@ -14,6 +14,7 @@ public partial class StorageSettingsWindow : Window
         InitializeComponent();
         _viewModel = viewModel;
         DataContext = viewModel;
+        Loaded += async (_, _) => await _viewModel.RefreshStorageStatisticsAsync();
     }
 
     private async void OnMoveDatabaseClick(object sender, RoutedEventArgs e)
@@ -212,19 +213,12 @@ public partial class StorageSettingsWindow : Window
 
     private async Task ExportAsync(string format, bool currentResultsOnly = false)
     {
-        if (currentResultsOnly && _viewModel.Items.Count == 0)
-        {
-            System.Windows.MessageBox.Show(T("현재 표시된 검색 결과가 없습니다."), T("내보내기 실패"),
-                MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
         var isCsv = format.Equals("csv", StringComparison.OrdinalIgnoreCase);
         var extension = isCsv ? ".csv" : ".json";
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Title = T(currentResultsOnly
-                ? isCsv ? "현재 표시된 검색 결과를 CSV로 내보내기" : "현재 표시된 검색 결과를 JSON으로 내보내기"
+                ? isCsv ? "현재 검색 조건으로 CSV 내보내기" : "현재 검색 조건으로 JSON 내보내기"
                 : isCsv ? "전체 기록을 CSV로 내보내기" : "전체 기록을 JSON으로 내보내기"),
             Filter = T(currentResultsOnly
                 ? isCsv ? "현재 결과 CSV 파일 (*.csv)|*.csv" : "현재 결과 JSON 파일 (*.json)|*.json"
@@ -250,8 +244,8 @@ public partial class StorageSettingsWindow : Window
             {
                 var completionMessage = currentResultsOnly
                     ? LocalizationManager.Instance.Format(
-                        "현재 표시된 검색 결과를 내보냈습니다.\n\n{0}",
-                        "Current search results exported.\n\n{0}", dialog.FileName)
+                        "현재 검색 조건의 전체 기록을 내보냈습니다.\n날짜를 선택하면 해당 기간의 열기 이력만 포함합니다.\n\n{0}",
+                        "Exported all history matching current filters.\nWith a date filter, only events in that range are included.\n\n{0}", dialog.FileName)
                     : LocalizationManager.Instance.Format(
                         "전체 기록을 내보냈습니다.\n\n{0}", "History exported.\n\n{0}", dialog.FileName);
                 System.Windows.MessageBox.Show(completionMessage,
@@ -270,6 +264,32 @@ public partial class StorageSettingsWindow : Window
     }
 
     private void OnOpenFolderClick(object sender, RoutedEventArgs e) => _viewModel.OpenDatabaseFolder();
+
+    private async void OnRefreshStorageClick(object sender, RoutedEventArgs e)
+    {
+        IsEnabled = false;
+        try { await _viewModel.RefreshStorageStatisticsAsync(); }
+        finally { IsEnabled = true; }
+    }
+
+    private async void OnCompactClick(object sender, RoutedEventArgs e)
+    {
+        var databasePath = _viewModel.DatabasePath;
+        var message = LocalizationManager.Instance.Format(
+            "다음 DB의 빈 공간을 정리합니다. 기록과 원본 파일은 삭제하지 않습니다.\n\n{0}\n\n작업 중 검색과 수집은 대기합니다. 추가 디스크 공간이 필요할 수 있습니다. 계속할까요?",
+            "Reclaim free space in this database. History and original files will not be deleted.\n\n{0}\n\nSearch and capture will wait during compaction. Extra disk space may be required. Continue?",
+            databasePath);
+        if (System.Windows.MessageBox.Show(this, message, T("공간 정리"),
+                MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+        IsEnabled = false;
+        try
+        {
+            var succeeded = await _viewModel.CompactDatabaseAsync(databasePath);
+            System.Windows.MessageBox.Show(this, _viewModel.StatusText, T("공간 정리"),
+                MessageBoxButton.OK, succeeded ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        finally { IsEnabled = true; }
+    }
 
     private void OnOpenAutoBackupFolderClick(object sender, RoutedEventArgs e)
     {

@@ -442,11 +442,23 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         return ExportCoreAsync(destinationPath, format, distinctIds, cancellationToken);
     }
 
+    public Task ExportSearchToAsync(string destinationPath, string format, string searchText,
+        HistoryDateRange? dateRange, HistoryFilters? filters = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (dateRange is not null && dateRange.EndUtc <= dateRange.StartUtc)
+            throw new ArgumentException("내보내기 날짜 범위가 유효하지 않습니다.", nameof(dateRange));
+        var selection = new HistoryExportSelection(searchText, dateRange, filters);
+        return Task.Run(() => ExportCoreAsync(destinationPath, format, null, cancellationToken, selection),
+            cancellationToken);
+    }
+
     private async Task ExportCoreAsync(
         string destinationPath,
         string format,
         IReadOnlyCollection<long>? itemIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HistoryExportSelection? selection = null)
     {
         ThrowIfDisposed();
         var targetPath = Path.GetFullPath(destinationPath);
@@ -481,7 +493,7 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.Transaction = (SqliteTransaction)transaction;
-                var itemFilter = string.Empty;
+                var conditions = new List<string>();
                 if (itemIds is not null)
                 {
                     var parameterNames = new List<string>(itemIds.Count);
@@ -493,8 +505,27 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
                         command.Parameters.AddWithValue(parameterName, itemId);
                     }
 
-                    itemFilter = $"WHERE r.id IN ({string.Join(", ", parameterNames)})";
+                    conditions.Add($"r.id IN ({string.Join(", ", parameterNames)})");
                 }
+
+                if (selection is not null)
+                {
+                    conditions.AddRange(BuildItemFilterConditions(command, selection.Filters));
+                    AddTextSearchConditions(command, conditions, selection.SearchText.Split(' ',
+                        StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                }
+                var eventJoin = "LEFT JOIN open_events AS e ON e.recent_item_id = r.id";
+                if (selection?.DateRange is { } range)
+                {
+                    eventJoin = """
+                        INNER JOIN open_events AS e ON e.recent_item_id = r.id
+                        AND e.opened_utc >= $exportStartUtc AND e.opened_utc < $exportEndUtc
+                        """;
+                    command.Parameters.AddWithValue("$exportStartUtc", range.StartUtc.UtcDateTime.ToString("O"));
+                    command.Parameters.AddWithValue("$exportEndUtc", range.EndUtc.UtcDateTime.ToString("O"));
+                }
+                var itemFilter = conditions.Count == 0 ? string.Empty
+                    : $"WHERE {string.Join(" AND ", conditions)}";
 
                 command.CommandText = $"""
                     SELECT r.id, r.target_path, r.display_name, r.extension, r.item_kind,
@@ -502,7 +533,7 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
                            r.last_link_write_utc, r.open_count, r.exists_flag,
                            e.opened_utc, e.source_link_path, e.is_estimated
                     FROM recent_items AS r
-                    LEFT JOIN open_events AS e ON e.recent_item_id = r.id
+                    {eventJoin}
                     {itemFilter}
                     ORDER BY r.id, e.opened_utc, e.id;
                     """;
@@ -516,7 +547,7 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
                     }
                     else
                     {
-                        await WriteJsonExportAsync(reader, output, cancellationToken);
+                        await WriteJsonExportAsync(reader, output, cancellationToken, selection);
                     }
                 }
 
@@ -567,7 +598,8 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
     }
 
     private static async Task WriteJsonExportAsync(
-        SqliteDataReader reader, Stream output, CancellationToken cancellationToken)
+        SqliteDataReader reader, Stream output, CancellationToken cancellationToken,
+        HistoryExportSelection? selection = null)
     {
         using var writer = new Utf8JsonWriter(output, new JsonWriterOptions
         {
@@ -579,6 +611,13 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         writer.WriteStartObject();
         writer.WriteNumber("schemaVersion", 1);
         writer.WriteString("exportedAtUtc", DateTimeOffset.UtcNow);
+        if (selection is not null)
+        {
+            writer.WritePropertyName("selection");
+            JsonSerializer.Serialize(writer, selection, options);
+            writer.WriteString("itemMetadataScope", "lifetime");
+            writer.WriteString("eventScope", selection.DateRange is null ? "lifetime" : "selectedDateRange");
+        }
         writer.WriteStartArray("items");
 
         HistoryExportItem? currentItem = null;
@@ -628,6 +667,81 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
             ? "'" + value
             : value;
         return $"\"{safeValue.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+    }
+
+    public Task<DatabaseStorageStatistics> GetStorageStatisticsAsync(
+        CancellationToken cancellationToken = default) => Task.Run(async () =>
+    {
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            return await ReadStorageStatisticsAsync(connection, cancellationToken).ConfigureAwait(false);
+        }
+        finally { _databaseGate.Release(); }
+    }, cancellationToken);
+
+    public Task<DatabaseStorageStatistics> CompactAsync(string expectedDatabasePath,
+        CancellationToken cancellationToken = default) => Task.Run(async () =>
+    {
+        ThrowIfDisposed();
+        await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Export holds the path gate. Wait for its snapshot before rewriting the database.
+            await _databasePathGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (!string.Equals(Path.GetFullPath(expectedDatabasePath), _databasePath,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("공간 정리 준비 중 데이터베이스가 변경되었습니다.");
+                await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+                await CheckpointForCompactionAsync(connection, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                await using var command = connection.CreateCommand();
+                // Microsoft.Data.Sqlite executes synchronously. Task.Run keeps VACUUM off the UI thread.
+                // VACUUM is atomic and preserves history. Once started, allow it to finish safely.
+                command.CommandText = "VACUUM;";
+                command.ExecuteNonQuery();
+                await CheckpointForCompactionAsync(connection, CancellationToken.None).ConfigureAwait(false);
+                return await ReadStorageStatisticsAsync(connection, CancellationToken.None).ConfigureAwait(false);
+            }
+            finally { _databasePathGate.Release(); }
+        }
+        finally { _databaseGate.Release(); }
+    }, cancellationToken);
+
+    private static async Task CheckpointForCompactionAsync(SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.GetInt64(0) != 0)
+            throw new IOException("다른 프로그램이 DB를 사용 중입니다. 잠시 후 다시 시도하세요.");
+    }
+
+    private async Task<DatabaseStorageStatistics> ReadStorageStatisticsAsync(SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        async Task<long> ReadPragmaAsync(string sql)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+        }
+        var pageSize = await ReadPragmaAsync("PRAGMA page_size;").ConfigureAwait(false);
+        var pageCount = await ReadPragmaAsync("PRAGMA page_count;").ConfigureAwait(false);
+        var freeCount = await ReadPragmaAsync("PRAGMA freelist_count;").ConfigureAwait(false);
+        static long FileBytes(string path)
+        {
+            try { return new FileInfo(path).Length; }
+            catch (FileNotFoundException) { return 0; }
+        }
+        return new DatabaseStorageStatistics(_databasePath, FileBytes(_databasePath),
+            FileBytes(_databasePath + "-wal"), FileBytes(_databasePath + "-shm"),
+            checked(pageCount * pageSize), checked(freeCount * pageSize));
     }
 
     public async Task<DatabaseDiagnostics> GetDiagnosticsAsync(
@@ -1156,17 +1270,8 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(
         Volatile.Read(ref _disposeState) != 0, this);
 
-    private async Task<IReadOnlyList<RecentItem>> SearchCoreAsync(
-        SqliteConnection connection,
-        string searchText,
-        DateTimeOffset? since,
-        HistoryDateRange? eventRange,
-        int limit,
-        CancellationToken cancellationToken,
-        HistoryFilters? filters = null)
+    private static List<string> BuildItemFilterConditions(SqliteCommand command, HistoryFilters? filters)
     {
-        await using var command = connection.CreateCommand();
-
         var conditions = new List<string>();
         if (!string.IsNullOrWhiteSpace(filters?.Extension))
         {
@@ -1181,12 +1286,43 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(filters?.Folder))
         {
             var folder = NormalizeFolderFilterPath(filters.Folder);
-            // 디렉터리 구분자까지 포함해 Work와 Work-old를 구분한다. LIKE 메타문자는 리터럴 처리한다.
             var prefix = folder + Path.DirectorySeparatorChar;
             var escapedPrefix = prefix.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
             conditions.Add("r.target_path LIKE $folderPrefix ESCAPE '\\'");
             command.Parameters.AddWithValue("$folderPrefix", escapedPrefix + "%");
         }
+        return conditions;
+    }
+
+    private static void AddTextSearchConditions(SqliteCommand command, List<string> conditions, string[] tokens)
+    {
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            if (TryGetExactExtensionPattern(tokens[i], out var extension))
+            {
+                conditions.Add($"r.extension = $query{i} COLLATE NOCASE");
+                command.Parameters.AddWithValue($"$query{i}", extension);
+            }
+            else
+            {
+                conditions.Add($"(r.display_name LIKE $query{i} ESCAPE '\\' OR r.target_path LIKE $query{i} ESCAPE '\\')");
+                command.Parameters.AddWithValue($"$query{i}", BuildLikePattern(tokens[i]));
+            }
+        }
+    }
+
+    private async Task<IReadOnlyList<RecentItem>> SearchCoreAsync(
+        SqliteConnection connection,
+        string searchText,
+        DateTimeOffset? since,
+        HistoryDateRange? eventRange,
+        int limit,
+        CancellationToken cancellationToken,
+        HistoryFilters? filters = null)
+    {
+        await using var command = connection.CreateCommand();
+
+        var conditions = BuildItemFilterConditions(command, filters);
         var tokens = searchText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var ftsQuery = BuildFtsQuery(tokens);
         var useFts = ftsQuery is not null && _ftsAvailable &&
@@ -1198,19 +1334,7 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         }
         else
         {
-            for (var i = 0; i < tokens.Length; i++)
-            {
-                if (TryGetExactExtensionPattern(tokens[i], out var extension))
-                {
-                    conditions.Add($"r.extension = $query{i} COLLATE NOCASE");
-                    command.Parameters.AddWithValue($"$query{i}", extension);
-                }
-                else
-                {
-                    conditions.Add($"(r.display_name LIKE $query{i} ESCAPE '\\' OR r.target_path LIKE $query{i} ESCAPE '\\')");
-                    command.Parameters.AddWithValue($"$query{i}", BuildLikePattern(tokens[i]));
-                }
-            }
+            AddTextSearchConditions(command, conditions, tokens);
         }
 
         if (since is not null)

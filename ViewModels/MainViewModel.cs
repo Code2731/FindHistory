@@ -22,6 +22,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _activityCancellation;
     private long _loadSequence;
     private long _activityLoadSequence;
+    private long _storageLoadSequence;
+    private DatabaseStorageStatistics? _storageStatistics;
+    private bool _storageStatisticsFailed;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
     private DateTime? _specificDate = DateTime.Today;
@@ -343,6 +346,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(MonitorStatusText));
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(SelectedLanguage));
+        OnPropertyChanged(nameof(StorageStatisticsText));
         if (_initialized)
         {
             ScheduleReload();
@@ -455,6 +459,69 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string DatabasePath => _database.DatabasePath;
 
     public string DatabaseDirectory => Path.GetDirectoryName(DatabasePath) ?? DatabasePath;
+
+    public string StorageStatisticsText
+    {
+        get
+        {
+            if (_storageStatistics is not { } stats)
+                return LocalizationManager.Instance.Translate(_storageStatisticsFailed
+                    ? "저장 공간을 확인하지 못했습니다. 다시 계산해 주세요."
+                    : "저장 공간을 확인하려면 다시 계산을 누르세요.");
+            return LocalizationManager.Instance.Format(
+                "전체 파일: {0:N2} MB\nDB: {1:N2} MB · WAL: {2:N2} MB · SHM: {3:N2} MB\nDB 내부 할당: {4:N2} MB · 회수 가능한 빈 페이지: {5:N2} MB",
+                "Total files: {0:N2} MB\nDB: {1:N2} MB · WAL: {2:N2} MB · SHM: {3:N2} MB\nAllocated in DB: {4:N2} MB · Reclaimable free pages: {5:N2} MB",
+                stats.TotalFileBytes / 1048576d, stats.DatabaseBytes / 1048576d,
+                stats.WalBytes / 1048576d, stats.SharedMemoryBytes / 1048576d,
+                stats.AllocatedBytes / 1048576d, stats.FreeBytes / 1048576d);
+        }
+    }
+
+    public async Task RefreshStorageStatisticsAsync()
+    {
+        var sequence = Interlocked.Increment(ref _storageLoadSequence);
+        try
+        {
+            var stats = await _database.GetStorageStatisticsAsync();
+            if (_disposed || sequence != Interlocked.Read(ref _storageLoadSequence) ||
+                !string.Equals(stats.DatabasePath, DatabasePath, StringComparison.OrdinalIgnoreCase)) return;
+            _storageStatistics = stats;
+            _storageStatisticsFailed = false;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Reading database storage statistics failed.", ex);
+            if (_disposed || sequence != Interlocked.Read(ref _storageLoadSequence)) return;
+            _storageStatistics = null;
+            _storageStatisticsFailed = true;
+        }
+        OnPropertyChanged(nameof(StorageStatisticsText));
+        OnPropertyChanged(nameof(DatabaseSizeText));
+    }
+
+    public async Task<bool> CompactDatabaseAsync(string expectedDatabasePath)
+    {
+        IsBusy = true;
+        StatusText = LocalizationManager.Instance.Format(
+            "기록을 유지하며 DB 공간을 정리하는 중…", "Compacting database without deleting history…");
+        try
+        {
+            await _database.CompactAsync(expectedDatabasePath);
+            await RefreshStorageStatisticsAsync();
+            StatusText = LocalizationManager.Instance.Format(
+                "DB 공간 정리를 완료했습니다. 기록은 유지되었습니다.",
+                "Database compaction completed. History was preserved.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Database compaction failed.", ex);
+            StatusText = LocalizationManager.Instance.Format(
+                "DB 공간 정리 실패: {0}", "Database compaction failed: {0}", ex.Message);
+            return false;
+        }
+        finally { IsBusy = false; }
+    }
 
     public string DatabaseSizeText
     {
@@ -654,6 +721,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             var safetyPath = await _database.RestoreFromAsync(backupPath);
             await LoadAsync(CancellationToken.None);
             await LoadActivityAsync(CancellationToken.None);
+            await RefreshStorageStatisticsAsync();
             OnPropertyChanged(nameof(DatabaseSizeText));
             StatusText = $"백업을 복원했습니다. 복원 전 DB 사본: {safetyPath}";
             return safetyPath;
@@ -694,21 +762,17 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public async Task<bool> ExportCurrentResultsAsync(string destinationPath, string format)
     {
-        var itemIds = Items.Select(item => item.Id).Distinct().ToArray();
-        if (itemIds.Length == 0)
-        {
-            StatusText = "현재 표시된 검색 결과가 없습니다.";
-            return false;
-        }
-
+        var searchText = SearchText;
+        var dateRange = BuildSelectedDateRange();
+        var filters = new HistoryFilters(ExtensionFilter, SelectedExistence.Exists, FolderFilter);
         IsBusy = true;
         StatusText = "현재 검색 결과를 내보내는 중…";
         try
         {
-            await _database.ExportItemsToAsync(destinationPath, format, itemIds);
+            await _database.ExportSearchToAsync(destinationPath, format, searchText, dateRange, filters);
             StatusText = LocalizationManager.Instance.Format(
-                "{0:N0}개 검색 결과를 내보냈습니다: {1}",
-                "Exported {0:N0} search results to: {1}", itemIds.Length, destinationPath);
+                "현재 검색 조건의 전체 기록을 내보냈습니다: {0}",
+                "Exported all history matching current filters to: {0}", destinationPath);
             return true;
         }
         catch (Exception ex)
@@ -886,6 +950,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void NotifyDatabaseLocationChanged()
     {
+        Interlocked.Increment(ref _storageLoadSequence);
+        _storageStatistics = null;
+        _storageStatisticsFailed = false;
+        OnPropertyChanged(nameof(StorageStatisticsText));
         OnPropertyChanged(nameof(DatabasePath));
         OnPropertyChanged(nameof(DatabaseDirectory));
         OnPropertyChanged(nameof(DatabaseSizeText));

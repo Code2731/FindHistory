@@ -25,6 +25,8 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="18" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="18" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <StackPanel>
@@ -153,7 +155,7 @@
                         Click="OnExportCsvClick" VerticalAlignment="Center" />
                 <Button Grid.Column="3" Content="{loc:Translate 'JSON 내보내기'}" Click="OnExportJsonClick"
                         VerticalAlignment="Center" />
-                <TextBlock Grid.Row="2" Text="{loc:Translate '현재 표시된 검색 결과만 내보냅니다. 선택된 항목의 전체 열기 이력도 포함합니다.'}"
+                <TextBlock Grid.Row="2" Text="{loc:Translate '현재 검색 조건 전체를 내보냅니다. 표시 개수 제한은 없습니다. 날짜 선택 시 해당 기간의 열기 이력만 포함합니다. 항목 요약은 전체 기간 값입니다.'}"
                            Style="{StaticResource SecondaryText}" FontSize="11" Margin="0,4,8,0"
                            TextWrapping="Wrap" VerticalAlignment="Center" />
                 <Button Grid.Row="2" Grid.Column="1" Content="{loc:Translate '현재 결과 CSV'}"
@@ -189,7 +191,26 @@
             </StackPanel>
         </Border>
 
-        <Grid Grid.Row="14">
+        <Border Grid.Row="14" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                CornerRadius="10" Padding="16,13">
+            <StackPanel>
+                <TextBlock Text="{loc:Translate '저장 공간'}" FontSize="14" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding StorageStatisticsText}" Style="{StaticResource SecondaryText}"
+                           FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBlock Text="{loc:Translate '조회 시점의 크기입니다. 백업 파일은 포함하지 않습니다. 빈 페이지 크기는 예상 회수량입니다.'}"
+                           Style="{StaticResource TertiaryText}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBlock Text="{loc:Translate '공간 정리는 기록을 삭제하지 않습니다. 작업 중 검색과 수집은 대기합니다. 추가 디스크 공간이 필요할 수 있습니다.'}"
+                           Style="{StaticResource SecondaryText}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="{loc:Translate '다시 계산'}" Style="{StaticResource QuietButton}"
+                            Click="OnRefreshStorageClick" />
+                    <Button Content="{loc:Translate '공간 정리'}" Click="OnCompactClick" Margin="12,0,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <Grid Grid.Row="16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />

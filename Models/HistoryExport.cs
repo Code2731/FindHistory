@@ -1,5 +1,10 @@
 namespace FindHistory.Models;
 
+public sealed record HistoryExportSelection(
+    string SearchText,
+    HistoryDateRange? DateRange,
+    HistoryFilters? Filters);
+
 public sealed record HistoryExportItem(
     long Id,
     string TargetPath,
