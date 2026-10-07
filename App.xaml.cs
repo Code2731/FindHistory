@@ -3,6 +3,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Forms = System.Windows.Forms;
 using FindHistory.Services;
+using FindHistory.Localization;
 using FindHistory.ViewModels;
 
 namespace FindHistory;
@@ -12,9 +13,12 @@ public partial class App : System.Windows.Application
     private readonly AppLogService _log = new();
     private RecentDatabase? _database;
     private RecentItemsMonitor? _monitor;
+    private AutoBackupService? _autoBackup;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
+    private Forms.ToolStripMenuItem? _trayOpenItem;
+    private Forms.ToolStripMenuItem? _trayExitItem;
     private System.Drawing.Icon? _trayApplicationIcon;
     private Mutex? _singleInstanceMutex;
     private bool _isExiting;
@@ -50,6 +54,7 @@ public partial class App : System.Windows.Application
         try
         {
             var settings = new AppSettingsService();
+            LocalizationManager.Instance.SetLanguage(settings.Language);
             var databaseIndex = Array.FindIndex(e.Args,
                 arg => arg.Equals("--database", StringComparison.OrdinalIgnoreCase));
             var databasePath = databaseIndex >= 0 && databaseIndex + 1 < e.Args.Length
@@ -89,6 +94,12 @@ public partial class App : System.Windows.Application
             }
 
             await _viewModel.InitializeAsync();
+
+            if (!isScreenshotRun)
+            {
+                _autoBackup = new AutoBackupService(_database, settings, _log);
+                _autoBackup.Start();
+            }
 
             if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
             {
@@ -136,7 +147,8 @@ public partial class App : System.Windows.Application
         catch (Exception ex)
         {
             _log.Error("Application startup failed.", ex);
-            System.Windows.MessageBox.Show($"FindHistory를 시작하지 못했습니다.\n\n{ex.Message}", "FindHistory",
+            System.Windows.MessageBox.Show(LocalizationManager.Instance.Translate(
+                    $"FindHistory를 시작하지 못했습니다.\n\n{ex.Message}"), "FindHistory",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             await ExitApplicationAsync();
         }
@@ -194,19 +206,43 @@ public partial class App : System.Windows.Application
     private void CreateTrayIcon()
     {
         var menu = new Forms.ContextMenuStrip();
-        menu.Items.Add("FindHistory 열기", null, (_, _) => ShowWindow());
+        _trayOpenItem = new Forms.ToolStripMenuItem();
+        _trayOpenItem.Click += (_, _) => ShowWindow();
+        menu.Items.Add(_trayOpenItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add("종료", null, (_, _) => _ = ExitApplicationAsync());
+        _trayExitItem = new Forms.ToolStripMenuItem();
+        _trayExitItem.Click += (_, _) => _ = ExitApplicationAsync();
+        menu.Items.Add(_trayExitItem);
+        LocalizationManager.Instance.PropertyChanged += OnLanguageChanged;
+        UpdateTrayLanguage();
 
         _trayApplicationIcon = LoadTrayIcon();
         _trayIcon = new Forms.NotifyIcon
         {
-            Text = "FindHistory - 최근 항목 기록 중",
+            Text = "FindHistory - " + LocalizationManager.Instance.Translate("최근 항목 기록 중"),
             Icon = _trayApplicationIcon,
             Visible = true,
             ContextMenuStrip = menu
         };
         _trayIcon.DoubleClick += (_, _) => ShowWindow();
+    }
+
+    private void OnLanguageChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(LocalizationManager.Language))
+        {
+            UpdateTrayLanguage();
+        }
+    }
+
+    private void UpdateTrayLanguage()
+    {
+        _trayOpenItem?.Text = LocalizationManager.Instance.Translate("FindHistory 열기");
+        _trayExitItem?.Text = LocalizationManager.Instance.Translate("종료");
+        if (_trayIcon is not null)
+        {
+            _trayIcon.Text = "FindHistory - " + LocalizationManager.Instance.Translate("최근 항목 기록 중");
+        }
     }
 
     private static System.Drawing.Icon LoadTrayIcon()
@@ -279,6 +315,13 @@ public partial class App : System.Windows.Application
         }
         finally
         {
+            if (_autoBackup is not null)
+            {
+                try { await _autoBackup.DisposeAsync(); }
+                catch (Exception ex) { _log.Error("Stopping automatic backup failed.", ex); }
+                _autoBackup = null;
+            }
+            LocalizationManager.Instance.PropertyChanged -= OnLanguageChanged;
             if (_trayIcon is not null)
             {
                 _trayIcon.Visible = false;
@@ -287,8 +330,19 @@ public partial class App : System.Windows.Application
             _trayApplicationIcon?.Dispose();
             _trayApplicationIcon = null;
             _window?.Close();
-            _database?.Dispose();
+            var database = _database;
             _database = null;
+            if (database is not null)
+            {
+                try
+                {
+                    await database.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _log.Error("An error occurred while closing the database.", ex);
+                }
+            }
             _singleInstanceMutex?.Dispose();
             _singleInstanceMutex = null;
             _log.Information("FindHistory shutdown completed.");

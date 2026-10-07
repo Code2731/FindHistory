@@ -1,3 +1,6 @@
+using FindHistory.Localization;
+using System.Globalization;
+
 namespace FindHistory.Models;
 
 public sealed record RecentItemCandidate(
@@ -22,9 +25,10 @@ public sealed record RecentItem(
     bool Exists,
     bool IsEstimatedHistory = false)
 {
-    public string LastSeenText => LastSeen.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
-    public string CountText => $"{OpenCount:N0}회";
-    public string ExistsText => Exists ? string.Empty : "찾을 수 없음";
+    public string LastSeenText => LastSeen.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+    public string ItemKindText => LocalizationManager.Instance.Translate(ItemKind);
+    public string CountText => LocalizationManager.Instance.Format("{0:N0}회", "{0:N0} opens", OpenCount);
+    public string ExistsText => Exists ? string.Empty : LocalizationManager.Instance.Translate("찾을 수 없음");
 }
 
 public sealed record HistoryStats(long UniqueItems, long TotalOpenCount);
@@ -56,8 +60,11 @@ public sealed record ActivityDay(
 {
     public string ToolTipText => !CanSelect
         ? Date.ToString("yyyy-MM-dd")
-        : $"{Date:yyyy-MM-dd} · {OpenCount:N0}회" +
-          (ContainsEstimated ? " · 일부 추정" : string.Empty);
+        : LocalizationManager.Instance.Format(
+              "{0:yyyy-MM-dd} · {1:N0}회", "{0:yyyy-MM-dd} · {1:N0} opens", Date, OpenCount) +
+          (ContainsEstimated
+              ? " · " + LocalizationManager.Instance.Translate("일부 추정")
+              : string.Empty);
 }
 
 public sealed record ActivityWeek(IReadOnlyList<ActivityDay> Days);

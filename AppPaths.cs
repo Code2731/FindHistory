@@ -11,4 +11,6 @@ public static class AppPaths
     public static string SettingsPath { get; } = Path.Combine(DataDirectory, "settings.json");
 
     public static string LogDirectory { get; } = Path.Combine(DataDirectory, "Logs");
+
+    public static string AutoBackupDirectory { get; } = Path.Combine(DataDirectory, "Backups");
 }

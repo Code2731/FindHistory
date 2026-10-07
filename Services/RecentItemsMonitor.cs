@@ -7,6 +7,7 @@ namespace FindHistory.Services;
 
 public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
 {
+    private const int WatcherBufferSize = 64 * 1024;
     private readonly RecentDatabase _database;
     private readonly ShortcutResolver _resolver;
     private readonly AppLogService? _log;
@@ -119,6 +120,8 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         var watcher = new FileSystemWatcher(_recentFolder)
         {
             Filter = "*.*",
+            // Windows allows up to 64 KiB. This reduces overflow risk during shortcut bursts.
+            InternalBufferSize = WatcherBufferSize,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
             IncludeSubdirectories = false
         };

@@ -7,6 +7,7 @@ using System.Text;
 using System.Windows;
 using FindHistory.Models;
 using FindHistory.Services;
+using FindHistory.Localization;
 
 namespace FindHistory.ViewModels;
 
@@ -20,6 +21,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private CancellationTokenSource? _searchCancellation;
     private CancellationTokenSource? _activityCancellation;
     private long _loadSequence;
+    private long _activityLoadSequence;
     private string _searchText = string.Empty;
     private DateRangeOption _selectedDateRange;
     private DateTime? _specificDate = DateTime.Today;
@@ -40,12 +42,43 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private string _extensionFilter = string.Empty;
     private string _folderFilter = string.Empty;
     private ExistenceOption _selectedExistence;
+    private IReadOnlyList<ExistenceOption> _existenceOptions = BuildExistenceOptions();
+    private IReadOnlyList<DateRangeOption> _dateRanges = BuildDateRanges();
     private IReadOnlyList<SavedSearch> _savedSearches;
     private SavedSearch? _selectedSavedSearch;
     private bool _isApplyingSavedSearch;
 
-    public IReadOnlyList<ExistenceOption> ExistenceOptions { get; } =
-    [new("전체 상태", null), new("존재함 (저장된 상태)", true), new("찾을 수 없음", false)];
+    public IReadOnlyList<LanguageOption> LanguageOptions { get; } =
+        [new("ko", "한국어"), new("en", "English")];
+
+    public string SelectedLanguage
+    {
+        get => _settings.Language;
+        set
+        {
+            if (string.Equals(value, _settings.Language, StringComparison.OrdinalIgnoreCase)) return;
+            try
+            {
+                _settings.SetLanguage(value);
+                LocalizationManager.Instance.SetLanguage(_settings.Language);
+                StatusText = "언어를 변경했습니다.";
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Saving the language setting failed.", ex);
+                StatusText = $"언어 설정 저장 실패: {ex.Message}";
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    public record LanguageOption(string Code, string Label);
+
+    public IReadOnlyList<ExistenceOption> ExistenceOptions
+    {
+        get => _existenceOptions;
+        private set => SetField(ref _existenceOptions, value);
+    }
 
     public string ExtensionFilter
     {
@@ -135,7 +168,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void SaveCurrentSearch()
     {
-        var dialog = new SaveSearchDialog { Owner = System.Windows.Application.Current.MainWindow };
+        var dialog = new SaveSearchDialog(SavedSearches.Select(search => search.Name).ToArray())
+            { Owner = System.Windows.Application.Current.MainWindow };
         if (dialog.ShowDialog() != true) return;
 
         var savedSearch = new SavedSearch(
@@ -146,7 +180,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             if (!_settings.AddSavedSearch(savedSearch))
             {
-                StatusText = "저장 검색은 최대 30개까지 보관할 수 있습니다.";
+                StatusText = $"저장 검색은 최대 {AppSettingsService.MaxSavedSearches}개까지 보관할 수 있습니다.";
                 return;
             }
 
@@ -221,15 +255,11 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         private set => SetField(ref _activitySummaryText, value);
     }
 
-    public IReadOnlyList<DateRangeOption> DateRanges { get; } =
-    [
-        new("전체 기간"),
-        new("오늘", 1),
-        new("최근 7일", 7),
-        new("최근 30일", 30),
-        new("최근 1년", 365),
-        new("날짜 지정", IsSpecificDate: true)
-    ];
+    public IReadOnlyList<DateRangeOption> DateRanges
+    {
+        get => _dateRanges;
+        private set => SetField(ref _dateRanges, value);
+    }
 
     public MainViewModel(
         RecentDatabase database,
@@ -243,6 +273,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _autoStart = autoStart;
         _settings = settings;
         _log = log;
+        LocalizationManager.Instance.SetLanguage(_settings.Language);
+        DateRanges = BuildDateRanges();
+        ExistenceOptions = BuildExistenceOptions();
+        LocalizationManager.Instance.PropertyChanged += OnLanguageChanged;
         _selectedDateRange = DateRanges[0];
         _selectedExistence = ExistenceOptions[0];
         _savedSearches = _settings.SavedSearches.ToArray();
@@ -266,6 +300,54 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty, () => SearchText.Length > 0);
         SelectActivityDateCommand = new RelayCommand<ActivityDay>(SelectActivityDate,
             day => day.CanSelect);
+    }
+
+    private static IReadOnlyList<ExistenceOption> BuildExistenceOptions() =>
+    [
+        new(LocalizationManager.Instance.Translate("전체 상태"), null),
+        new(LocalizationManager.Instance.Translate("존재함 (저장된 상태)"), true),
+        new(LocalizationManager.Instance.Translate("찾을 수 없음"), false)
+    ];
+
+    private static IReadOnlyList<DateRangeOption> BuildDateRanges() =>
+    [
+        new(LocalizationManager.Instance.Translate("전체 기간")),
+        new(LocalizationManager.Instance.Translate("오늘"), 1),
+        new(LocalizationManager.Instance.Translate("최근 7일"), 7),
+        new(LocalizationManager.Instance.Translate("최근 30일"), 30),
+        new(LocalizationManager.Instance.Translate("최근 1년"), 365),
+        new(LocalizationManager.Instance.Translate("날짜 지정"), IsSpecificDate: true)
+    ];
+
+    private void OnLanguageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(LocalizationManager.Language)) return;
+
+        var selectedDays = SelectedDateRange.CalendarDayCount;
+        var selectedSpecificDate = SelectedDateRange.IsSpecificDate;
+        var selectedExists = SelectedExistence.Exists;
+        DateRanges = BuildDateRanges();
+        ExistenceOptions = BuildExistenceOptions();
+        _selectedDateRange = DateRanges.First(option =>
+            option.CalendarDayCount == selectedDays && option.IsSpecificDate == selectedSpecificDate);
+        _selectedExistence = ExistenceOptions.First(option => option.Exists == selectedExists);
+        OnPropertyChanged(nameof(SelectedDateRange));
+        OnPropertyChanged(nameof(SelectedExistence));
+        OnPropertyChanged(nameof(IsSpecificDateSelected));
+        OnPropertyChanged(nameof(FilterChips));
+        Items = Items.ToArray();
+        ActivityWeeks = ActivityWeeks.ToArray();
+        OnPropertyChanged(nameof(ActivityPeriodText));
+        OnPropertyChanged(nameof(ActivitySummaryText));
+        OnPropertyChanged(nameof(SummaryText));
+        OnPropertyChanged(nameof(MonitorStatusText));
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(SelectedLanguage));
+        if (_initialized)
+        {
+            ScheduleReload();
+            ScheduleActivityReload();
+        }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -342,19 +424,19 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public string StatusText
     {
-        get => _statusText;
+        get => LocalizationManager.Instance.Translate(_statusText);
         private set => SetField(ref _statusText, value);
     }
 
     public string SummaryText
     {
-        get => _summaryText;
+        get => LocalizationManager.Instance.Translate(_summaryText);
         private set => SetField(ref _summaryText, value);
     }
 
     public string MonitorStatusText
     {
-        get => _monitorStatusText;
+        get => LocalizationManager.Instance.Translate(_monitorStatusText);
         private set => SetField(ref _monitorStatusText, value);
     }
 
@@ -417,6 +499,41 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 OnPropertyChanged();
             }
         }
+    }
+
+    public string AutoBackupDirectory => AppPaths.AutoBackupDirectory;
+    public IReadOnlyList<int> AutoBackupRetentionOptions { get; } = Enumerable.Range(1, 30).ToArray();
+
+    public bool AutoBackupEnabled
+    {
+        get => _settings.AutoBackupEnabled;
+        set => SaveAutoBackupSettings(value, AutoBackupRetention);
+    }
+
+    public int AutoBackupRetention
+    {
+        get => _settings.AutoBackupRetention;
+        set => SaveAutoBackupSettings(AutoBackupEnabled, value);
+    }
+
+    private void SaveAutoBackupSettings(bool enabled, int retention)
+    {
+        try
+        {
+            _settings.SetAutoBackup(enabled, retention);
+            StatusText = LocalizationManager.Instance.Format(
+                "자동 백업 설정을 저장했습니다.", "Automatic backup settings saved.");
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Saving automatic backup settings failed.", ex);
+            StatusText = LocalizationManager.Instance.Format(
+                "자동 백업 설정 저장 실패: {0}", "Saving automatic backup settings failed: {0}", ex.Message);
+            System.Windows.MessageBox.Show(StatusText, LocalizationManager.Instance.Translate("설정"),
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        OnPropertyChanged(nameof(AutoBackupEnabled));
+        OnPropertyChanged(nameof(AutoBackupRetention));
     }
 
     public bool IsBusy
@@ -575,6 +692,37 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    public async Task<bool> ExportCurrentResultsAsync(string destinationPath, string format)
+    {
+        var itemIds = Items.Select(item => item.Id).Distinct().ToArray();
+        if (itemIds.Length == 0)
+        {
+            StatusText = "현재 표시된 검색 결과가 없습니다.";
+            return false;
+        }
+
+        IsBusy = true;
+        StatusText = "현재 검색 결과를 내보내는 중…";
+        try
+        {
+            await _database.ExportItemsToAsync(destinationPath, format, itemIds);
+            StatusText = LocalizationManager.Instance.Format(
+                "{0:N0}개 검색 결과를 내보냈습니다: {1}",
+                "Exported {0:N0} search results to: {1}", itemIds.Length, destinationPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Search result {format} export failed.", ex);
+            StatusText = $"검색 결과 내보내기 실패: {ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     private static bool TryGetAutoStart(AutoStartService autoStart)
     {
         try
@@ -700,37 +848,39 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                       ?? assembly.GetName().Version?.ToString()
                       ?? "알 수 없음";
         var databaseBytes = TryGetFileSize(DatabasePath);
+        var isEnglish = LocalizationManager.Instance.Language == "en";
+        string Label(string korean) => LocalizationManager.Instance.Translate(korean);
         var builder = new StringBuilder();
-        builder.AppendLine("FindHistory 진단 정보")
-            .AppendLine($"생성 시각: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}")
-            .AppendLine($"앱 버전: {version}")
-            .AppendLine($"운영체제: {RuntimeInformation.OSDescription}")
-            .AppendLine($"프로세스: {RuntimeInformation.ProcessArchitecture} / .NET {Environment.Version}")
+        builder.AppendLine(isEnglish ? "FindHistory Diagnostics" : "FindHistory 진단 정보")
+            .AppendLine($"{Label("생성 시각")}: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}")
+            .AppendLine($"{Label("앱 버전")}: {version}")
+            .AppendLine($"{Label("운영체제")}: {RuntimeInformation.OSDescription}")
+            .AppendLine($"{Label("프로세스")}: {RuntimeInformation.ProcessArchitecture} / .NET {Environment.Version}")
             .AppendLine()
-            .AppendLine("[최근 항목 감시]")
-            .AppendLine($"상태: {FormatMonitorState(monitor)}")
-            .AppendLine($"감시 폴더: {monitor.RecentFolder}")
-            .AppendLine($"시작 시각: {FormatLocalTime(monitor.StartedUtc)}")
-            .AppendLine($"마지막 전체 스캔: {FormatLocalTime(monitor.LastScanCompletedUtc)}")
-            .AppendLine($"마지막 스캔 항목: {monitor.LastScanItemCount:N0}개")
-            .AppendLine($"마지막 스캔 시간: {FormatDuration(monitor.LastScanDuration)}")
-            .AppendLine($"마지막 실시간 기록: {FormatLocalTime(monitor.LastCaptureUtc)}")
-            .AppendLine($"세션 실시간 기록: {monitor.SessionCaptureCount:N0}개")
-            .AppendLine($"감시 복구 횟수: {monitor.WatcherRecoveryCount:N0}회")
-            .AppendLine($"진행 중 작업: {monitor.PendingTaskCount:N0}개")
-            .AppendLine($"마지막 오류: {FormatError(monitor)}")
+            .AppendLine(isEnglish ? "[Recent Items Monitor]" : "[최근 항목 감시]")
+            .AppendLine($"{Label("상태")}: {FormatMonitorState(monitor)}")
+            .AppendLine($"{Label("감시 폴더")}: {monitor.RecentFolder}")
+            .AppendLine($"{Label("시작 시각")}: {FormatLocalTime(monitor.StartedUtc)}")
+            .AppendLine($"{Label("마지막 전체 스캔")}: {FormatLocalTime(monitor.LastScanCompletedUtc)}")
+            .AppendLine($"{Label("마지막 스캔 항목")}: {monitor.LastScanItemCount:N0} {(isEnglish ? "items" : "개")}")
+            .AppendLine($"{Label("마지막 스캔 시간")}: {FormatDuration(monitor.LastScanDuration)}")
+            .AppendLine($"{Label("마지막 실시간 기록")}: {FormatLocalTime(monitor.LastCaptureUtc)}")
+            .AppendLine($"{Label("세션 실시간 기록")}: {monitor.SessionCaptureCount:N0} {(isEnglish ? "captures" : "개")}")
+            .AppendLine($"{Label("감시 복구 횟수")}: {monitor.WatcherRecoveryCount:N0} {(isEnglish ? "times" : "회")}")
+            .AppendLine($"{Label("진행 중 작업")}: {monitor.PendingTaskCount:N0}")
+            .AppendLine($"{Label("마지막 오류")}: {FormatError(monitor)}")
             .AppendLine()
-            .AppendLine("[데이터베이스]")
-            .AppendLine($"경로: {DatabasePath}")
-            .AppendLine($"파일 크기: {FormatBytes(databaseBytes)}")
-            .AppendLine($"고유 항목: {database.UniqueItems:N0}개")
-            .AppendLine($"누적 열기 횟수: {database.TotalOpenCount:N0}회")
-            .AppendLine($"저장된 날짜 이벤트: {database.StoredEvents:N0}개")
-            .AppendLine($"추정 날짜 이벤트: {database.EstimatedEvents:N0}개")
+            .AppendLine(isEnglish ? "[Database]" : "[데이터베이스]")
+            .AppendLine($"{Label("경로")}: {DatabasePath}")
+            .AppendLine($"{Label("파일 크기")}: {FormatBytes(databaseBytes)}")
+            .AppendLine($"{Label("고유 항목")}: {database.UniqueItems:N0} {(isEnglish ? "items" : "개")}")
+            .AppendLine($"{Label("누적 열기 횟수")}: {database.TotalOpenCount:N0} {(isEnglish ? "opens" : "회")}")
+            .AppendLine($"{Label("저장된 날짜 이벤트")}: {database.StoredEvents:N0} {(isEnglish ? "events" : "개")}")
+            .AppendLine($"{Label("추정 날짜 이벤트")}: {database.EstimatedEvents:N0} {(isEnglish ? "events" : "개")}")
             .AppendLine()
-            .AppendLine("[설정]")
-            .AppendLine($"로그인 시 자동 실행: {(AutoStartEnabled ? "사용" : "사용 안 함")}")
-            .AppendLine($"로그 폴더: {_log.LogDirectory}");
+            .AppendLine(isEnglish ? "[Settings]" : "[설정]")
+            .AppendLine($"{Label("로그인 시 자동 실행")}: {Label(AutoStartEnabled ? "사용" : "사용 안 함")}")
+            .AppendLine($"{Label("로그 폴더")}: {_log.LogDirectory}");
         return builder.ToString().TrimEnd();
     }
 
@@ -849,6 +999,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private async Task LoadActivityAsync(CancellationToken cancellationToken)
     {
+        var sequence = Interlocked.Increment(ref _activityLoadSequence);
         const int weekCount = 16;
         var today = DateTime.Today;
         var daysSinceMonday = ((int)today.DayOfWeek + 6) % 7;
@@ -858,6 +1009,10 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var activity = await Task.Run(() => _database.GetDailyActivityAsync(
             range, cancellationToken: cancellationToken), cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
+        if (sequence != Volatile.Read(ref _activityLoadSequence) || _disposed)
+        {
+            return;
+        }
 
         var byDate = activity.ToDictionary(day => day.Date.Date);
         var maximumCount = activity.Count == 0 ? 0 : activity.Max(day => day.OpenCount);
@@ -874,7 +1029,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 days.Add(new ActivityDay(
                     date,
                     openCount,
-                    CalculateActivityLevel(openCount, maximumCount),
+                    ActivityLevelCalculator.Calculate(openCount, maximumCount),
                     daily?.ContainsEstimated ?? false,
                     date == today,
                     selectedDate == date,
@@ -886,19 +1041,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
         ActivityWeeks = weeks;
         ActivityPeriodText = $"{firstMonday:yyyy.MM.dd} – {today:yyyy.MM.dd}";
-        ActivitySummaryText = $"{activity.Sum(day => day.OpenCount):N0}회 · " +
-                              $"활동 {activity.Count:N0}일";
-    }
-
-    private static int CalculateActivityLevel(int count, int maximumCount)
-    {
-        if (count <= 0 || maximumCount <= 0)
-        {
-            return 0;
-        }
-
-        var normalized = Math.Log(count + 1d) / Math.Log(maximumCount + 1d);
-        return Math.Clamp((int)Math.Ceiling(normalized * 4d), 1, 4);
+        ActivitySummaryText = LocalizationManager.Instance.Format(
+            "{0:N0}회 · 활동 {1:N0}일", "{0:N0} opens · {1:N0} active days",
+            activity.Sum(day => day.OpenCount), activity.Count);
     }
 
     private void SelectActivityDate(ActivityDay day)
@@ -959,17 +1104,21 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         LastSearchLatencyMilliseconds = Stopwatch.GetElapsedTime(latencyStartedTimestamp).TotalMilliseconds;
         if (dateRange is null)
         {
-            SummaryText = $"{snapshot.Items.Count:N0}개 결과  ·  {snapshot.Stats.UniqueItems:N0}개 항목  ·  " +
-                          $"누적 {snapshot.Stats.TotalOpenCount:N0}회";
+            SummaryText = LocalizationManager.Instance.Format(
+                "{0:N0}개 결과  ·  {1:N0}개 항목  ·  누적 {2:N0}회",
+                "{0:N0} results  ·  {1:N0} items  ·  {2:N0} total opens",
+                snapshot.Items.Count, snapshot.Stats.UniqueItems, snapshot.Stats.TotalOpenCount);
         }
         else
         {
             var rangeOpenCount = snapshot.Items.Sum(item => item.OpenCount);
             var estimatedText = snapshot.Items.Any(item => item.IsEstimatedHistory)
-                ? "  ·  이전 기록 일부 추정"
+                ? "  ·  " + LocalizationManager.Instance.Translate("이전 기록 일부 추정")
                 : string.Empty;
-            SummaryText = $"{snapshot.Items.Count:N0}개 결과  ·  {dateRange.Label} {rangeOpenCount:N0}회" +
-                          estimatedText;
+            SummaryText = LocalizationManager.Instance.Format(
+                              "{0:N0}개 결과  ·  {1} {2:N0}회",
+                              "{0:N0} results  ·  {1} {2:N0} opens",
+                              snapshot.Items.Count, dateRange.Label, rangeOpenCount) + estimatedText;
         }
     }
 
@@ -1000,19 +1149,52 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnHistoryChanged(object? sender, EventArgs e) =>
-        System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+        PostToUi(() =>
         {
             ScheduleReload();
             ScheduleActivityReload();
-        });
+        }, "recent history refresh");
 
     private void OnMonitorError(object? sender, string message)
     {
-        System.Windows.Application.Current.Dispatcher.InvokeAsync(() => StatusText = $"감시 오류: {message}");
+        PostToUi(() => StatusText = $"감시 오류: {message}", "monitor error notification");
     }
 
     private void OnDiagnosticsChanged(object? sender, EventArgs e) =>
-        System.Windows.Application.Current.Dispatcher.InvokeAsync(UpdateMonitorStatus);
+        PostToUi(UpdateMonitorStatus, "monitor diagnostics update");
+
+    private void PostToUi(Action action, string operationName)
+    {
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (_disposed || dispatcher is null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = dispatcher.InvokeAsync(() =>
+            {
+                if (_disposed || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+                {
+                    return;
+                }
+
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    _log.Error($"Could not complete the {operationName} on the UI thread.", ex);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Could not dispatch the {operationName} to the UI thread.", ex);
+        }
+    }
 
     private void UpdateMonitorStatus()
     {
@@ -1081,24 +1263,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         if (monitor.IsStopping)
         {
-            return "종료 중";
+            return LocalizationManager.Instance.Translate("종료 중");
         }
         if (!monitor.IsStarted)
         {
-            return "시작 전";
+            return LocalizationManager.Instance.Translate("시작 전");
         }
-        return monitor.IsWatcherActive ? "정상 감시 중" : "감시기 비활성";
+        return LocalizationManager.Instance.Translate(monitor.IsWatcherActive ? "정상 감시 중" : "감시기 비활성");
     }
 
     private static string FormatLocalTime(DateTimeOffset? utc) =>
-        utc is null ? "기록 없음" : utc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+        utc is null
+            ? LocalizationManager.Instance.Translate("기록 없음")
+            : utc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
 
     private static string FormatDuration(TimeSpan? duration) =>
         duration is null ? "기록 없음" : $"{duration.Value.TotalMilliseconds:N0} ms";
 
     private static string FormatError(MonitorDiagnostics monitor) =>
         monitor.LastErrorUtc is null
-            ? "없음"
+            ? LocalizationManager.Instance.Translate("없음")
             : $"{FormatLocalTime(monitor.LastErrorUtc)} · {monitor.LastErrorMessage}";
 
     private static long? TryGetFileSize(string path)
@@ -1152,6 +1336,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _disposed = true;
+        Interlocked.Increment(ref _activityLoadSequence);
+        LocalizationManager.Instance.PropertyChanged -= OnLanguageChanged;
         _monitor.HistoryChanged -= OnHistoryChanged;
         _monitor.MonitorError -= OnMonitorError;
         _monitor.DiagnosticsChanged -= OnDiagnosticsChanged;

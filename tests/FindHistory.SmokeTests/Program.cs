@@ -1,5 +1,6 @@
 using FindHistory.Models;
 using FindHistory.Services;
+using FindHistory.Localization;
 using System.Text.Json;
 
 var testRoot = Path.Combine(Path.GetTempPath(), $"FindHistory-Smoke-{Guid.NewGuid():N}");
@@ -147,6 +148,18 @@ try
         "중복 이벤트 제거 후 두 번째 날짜의 활동 횟수가 정확하지 않습니다.");
     Assert(dailyActivity.All(day => !day.ContainsEstimated),
         "새로 수집한 활동이 추정 기록으로 잘못 표시되었습니다.");
+    Assert(ActivityLevelCalculator.Calculate(0, 0) == 0,
+        "활동이 없는 날짜에 히트맵 단계가 표시되었습니다.");
+    Assert(ActivityLevelCalculator.Calculate(1, 1) == 1,
+        "기록이 한 건뿐일 때 최대 활동 색상으로 표시되었습니다.");
+    Assert(ActivityLevelCalculator.Calculate(3, 3) == 1 &&
+           ActivityLevelCalculator.Calculate(4, 4) == 2 &&
+           ActivityLevelCalculator.Calculate(10, 10) == 3 &&
+           ActivityLevelCalculator.Calculate(25, 25) == 4,
+        "히트맵 절대 활동 임계값이 올바르게 적용되지 않았습니다.");
+    Assert(ActivityLevelCalculator.Calculate(2, 100) == 1 &&
+           ActivityLevelCalculator.Calculate(100, 1000) == 3,
+        "절대 임계값과 기간 내 상대 비교가 함께 적용되지 않았습니다.");
 
     var emptyDayRange = new HistoryDateRange(
         new DateTimeOffset(2026, 9, 22, 0, 0, 0, TimeSpan.Zero),
@@ -196,6 +209,10 @@ try
     Assert((await database.SearchWithStatsAsync("boundary", boundaryRange,
         filters: new HistoryFilters(Folder: Path.Combine(testRoot, "time")))).Items.Count == 0,
         "폴더 필터가 이름의 일부만 같은 인접 폴더를 반환했습니다.");
+    var invalidFolderFilter = new HistoryFilters(Folder: "invalid\0folder");
+    await AssertThrowsAsync(
+        () => database.SearchWithStatsAsync("boundary", boundaryRange, filters: invalidFolderFilter),
+        "잘못된 저장 폴더 경로가 검색 오류로 명확하게 처리되지 않았습니다.");
     var literalFolder = Path.Combine(testRoot, "work_%");
     await database.UpsertAsync(new RecentItemCandidate(Path.Combine(literalFolder, "nested", "literal.txt"),
         "literal.txt", "TXT", "파일", Path.Combine(testRoot, "literal.lnk"), boundaryStart, true));
@@ -214,8 +231,54 @@ try
         "DST 시작일의 로컬 날짜 범위를 23시간으로 변환하지 못했습니다.");
     Assert(fallDstRange.EndUtc - fallDstRange.StartUtc == TimeSpan.FromHours(25),
         "DST 종료일의 로컬 날짜 범위를 25시간으로 변환하지 못했습니다.");
+    var springDstEvents = new[]
+    {
+        new DateTimeOffset(2026, 3, 8, 7, 59, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 3, 8, 8, 0, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 3, 8, 9, 30, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 3, 8, 10, 30, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 3, 9, 7, 0, 0, TimeSpan.Zero)
+    };
+    for (var index = 0; index < springDstEvents.Length; index++)
+    {
+        await database.UpsertAsync(new RecentItemCandidate(
+            Path.Combine(testRoot, "dst", $"spring-{index}.txt"), $"spring-{index}.txt", "TXT", "파일",
+            Path.Combine(testRoot, "dst", $"spring-{index}.lnk"), springDstEvents[index], false));
+    }
+    var springDstActivity = await database.GetDailyActivityAsync(springDstRange, pacific);
+    Assert(springDstActivity.Count == 1 &&
+           springDstActivity[0].Date == new DateTime(2026, 3, 8) &&
+           springDstActivity[0].OpenCount == 3,
+        "SQL 활동 집계가 DST 시작일의 로컬 경계 또는 23시간 범위를 정확히 처리하지 못했습니다.");
+    var fallDstEvents = new[]
+    {
+        new DateTimeOffset(2026, 11, 1, 6, 59, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 11, 1, 7, 0, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 11, 1, 8, 30, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 11, 1, 9, 30, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 11, 2, 8, 0, 0, TimeSpan.Zero)
+    };
+    for (var index = 0; index < fallDstEvents.Length; index++)
+    {
+        await database.UpsertAsync(new RecentItemCandidate(
+            Path.Combine(testRoot, "dst", $"fall-{index}.txt"), $"fall-{index}.txt", "TXT", "파일",
+            Path.Combine(testRoot, "dst", $"fall-{index}.lnk"), fallDstEvents[index], false));
+    }
+    var fallDstActivity = await database.GetDailyActivityAsync(fallDstRange, pacific);
+    Assert(fallDstActivity.Count == 1 &&
+           fallDstActivity[0].Date == new DateTime(2026, 11, 1) &&
+           fallDstActivity[0].OpenCount == 3,
+        "SQL 활동 집계가 DST 종료일의 중복 시각 또는 25시간 범위를 정확히 처리하지 못했습니다.");
 
     var databaseDiagnostics = await database.GetDiagnosticsAsync();
+    var extendedActivity = await database.GetDailyActivityAsync(
+        new HistoryDateRange(
+            new DateTimeOffset(2025, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2027, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            "확장 활동 범위"),
+        TimeZoneInfo.Utc);
+    Assert(extendedActivity.Sum(day => day.OpenCount) == databaseDiagnostics.StoredEvents,
+        "366일을 넘는 활동 범위의 대체 집계가 전체 이벤트를 보존하지 못했습니다.");
     Assert(databaseDiagnostics.UniqueItems > 0 && databaseDiagnostics.StoredEvents > 0,
         "데이터베이스 진단 통계를 읽지 못했습니다.");
     Assert(databaseDiagnostics.EstimatedEvents == 0,
@@ -249,6 +312,24 @@ try
                exportDiagnostics.StoredEvents,
             "JSON 내보내기에 전체 열기 이벤트가 들어가지 않았습니다.");
     }
+    var formulaSearchItem = (await database.SearchAsync("formula-like", null)).Single();
+    var searchCsvPath = Path.Combine(testRoot, "exports", "search-results.csv");
+    var searchJsonPath = Path.Combine(testRoot, "exports", "search-results.json");
+    await database.ExportItemsToAsync(searchCsvPath, "csv", [formulaSearchItem.Id]);
+    await database.ExportItemsToAsync(searchJsonPath, "json", [formulaSearchItem.Id]);
+    Assert((await File.ReadAllTextAsync(searchCsvPath)).Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Length == 2,
+        "검색 결과 CSV에 선택한 항목만 포함되지 않았습니다.");
+    using (var searchJsonDocument = JsonDocument.Parse(await File.ReadAllTextAsync(searchJsonPath)))
+    {
+        var exportedItems = searchJsonDocument.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert(exportedItems.Length == 1 &&
+               exportedItems[0].GetProperty("displayName").GetString() == formulaLikeName &&
+               exportedItems[0].GetProperty("events").GetArrayLength() == 1,
+            "검색 결과 JSON에 선택 항목과 전체 열기 이력을 내보내지 못했습니다.");
+    }
+    await AssertThrowsAsync(
+        () => database.ExportItemsToAsync(Path.Combine(testRoot, "exports", "empty.json"), "json", []),
+        "빈 검색 결과 내보내기를 거부하지 않았습니다.");
 
     var preBackupItemCount = (await database.GetStatsAsync()).UniqueItems;
     var backupPath = Path.Combine(testRoot, "backups", "findhistory.fhbackup");
@@ -374,6 +455,65 @@ try
             "미래 버전을 거부하기 전에 DB 스키마를 수정했습니다.");
     }
 
+    var versionOnePath = Path.Combine(testRoot, "version-one", "findhistory.db");
+    Directory.CreateDirectory(Path.GetDirectoryName(versionOnePath)!);
+    await using (var versionOneConnection = new Microsoft.Data.Sqlite.SqliteConnection(
+                     $"Data Source={versionOnePath};Pooling=False"))
+    {
+        await versionOneConnection.OpenAsync();
+        await using var versionOneCommand = versionOneConnection.CreateCommand();
+        versionOneCommand.CommandText = """
+            CREATE TABLE recent_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_path TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                display_name TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                item_kind TEXT NOT NULL,
+                source_link_path TEXT NOT NULL,
+                first_seen_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL,
+                last_link_write_utc TEXT NOT NULL,
+                open_count INTEGER NOT NULL DEFAULT 1,
+                exists_flag INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE open_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recent_item_id INTEGER NOT NULL,
+                opened_utc TEXT NOT NULL,
+                source_link_path TEXT NOT NULL,
+                is_estimated INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(recent_item_id, opened_utc),
+                FOREIGN KEY(recent_item_id) REFERENCES recent_items(id) ON DELETE CASCADE
+            );
+            CREATE TABLE history_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                unique_items INTEGER NOT NULL,
+                total_open_count INTEGER NOT NULL
+            );
+            INSERT INTO recent_items (
+                id, target_path, display_name, extension, item_kind, source_link_path,
+                first_seen_utc, last_seen_utc, last_link_write_utc, open_count, exists_flag)
+            VALUES (1, 'v1-item.txt', 'v1-item.txt', 'TXT', '파일', 'v1-item.lnk',
+                    '2026-07-01T12:00:00.0000000+00:00',
+                    '2026-07-01T12:00:00.0000000+00:00',
+                    '2026-07-01T12:00:00.0000000+00:00', 3, 1);
+            INSERT INTO open_events (recent_item_id, opened_utc, source_link_path, is_estimated)
+            VALUES (1, '2026-07-01T12:00:00.0000000+00:00', 'v1-item.lnk', 0),
+                   (1, '2026-06-30T12:00:00.0000000+00:00', 'v1-item.lnk', 1);
+            INSERT INTO history_stats (id, unique_items, total_open_count) VALUES (1, 1, 3);
+            PRAGMA user_version = 1;
+            """;
+        await versionOneCommand.ExecuteNonQueryAsync();
+    }
+    using (var versionOneDatabase = new RecentDatabase(versionOnePath))
+    {
+        await versionOneDatabase.InitializeAsync();
+        var migratedDiagnostics = await versionOneDatabase.GetDiagnosticsAsync();
+        Assert(migratedDiagnostics.UniqueItems == 1 && migratedDiagnostics.TotalOpenCount == 3 &&
+               migratedDiagnostics.StoredEvents == 2 && migratedDiagnostics.EstimatedEvents == 1,
+            "버전 1 DB의 진단 카운터를 정확히 이관하지 못했습니다.");
+    }
+
     var legacyPath = Path.Combine(testRoot, "legacy", "findhistory.db");
     Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
     var legacyOpenedAt = new DateTimeOffset(2026, 8, 15, 12, 0, 0, TimeSpan.Zero);
@@ -432,12 +572,19 @@ try
             "이관 시 저장된 전체 열기 횟수가 보존되지 않았습니다.");
         Assert((await legacyDatabase.GetDiagnosticsAsync()).EstimatedEvents == 1,
             "DB를 다시 초기화할 때 추정 이벤트가 중복 생성되었습니다.");
+        await legacyDatabase.UpsertAsync(new RecentItemCandidate(
+            Path.Combine(testRoot, "legacy.txt"), "legacy.txt", "TXT", "파일",
+            Path.Combine(testRoot, "legacy.lnk"), legacyOpenedAt, false));
+        var confirmedLegacyDiagnostics = await legacyDatabase.GetDiagnosticsAsync();
+        Assert(confirmedLegacyDiagnostics.StoredEvents == 1 &&
+               confirmedLegacyDiagnostics.EstimatedEvents == 0,
+            "추정 이벤트가 실제 감시 이벤트로 확인될 때 진단 카운터가 갱신되지 않았습니다.");
         await using var schemaConnection = new Microsoft.Data.Sqlite.SqliteConnection(
             $"Data Source={legacyPath};Pooling=False");
         await schemaConnection.OpenAsync();
         await using var schemaCommand = schemaConnection.CreateCommand();
         schemaCommand.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt32(await schemaCommand.ExecuteScalarAsync()) == 1,
+        Assert(Convert.ToInt32(await schemaCommand.ExecuteScalarAsync()) == 2,
             "완료된 스키마 이관 버전이 기록되지 않았습니다.");
         schemaCommand.CommandText =
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='recent_items_fts_au';";
@@ -485,19 +632,64 @@ try
 
     var settingsPath = Path.Combine(testRoot, "settings.json");
     var settings = new AppSettingsService(settingsPath);
+    Assert(settings.Language == "ko", "새 설정의 기본 언어가 한국어가 아닙니다.");
+    Assert(!settings.AutoBackupEnabled && settings.AutoBackupRetention == 7,
+        "자동 백업은 기본으로 꺼져 있어야 합니다.");
+    settings.SetAutoBackup(true, 3);
     settings.SetDatabasePath(movedPath);
+    settings.SetLanguage("en");
     var savedSearch = new SavedSearch(Guid.NewGuid(), "MP4 영상", "*.mp4", "mp4", null,
         Path.Combine(testRoot, "videos"), 7, null, false);
     Assert(settings.AddSavedSearch(savedSearch), "저장 검색을 추가하지 못했습니다.");
+    var duplicateSearch = savedSearch with { Id = Guid.NewGuid(), Name = "  mp4 영상  " };
+    await AssertThrowsAsync(() => Task.Run(() => settings.AddSavedSearch(duplicateSearch)),
+        "대소문자와 앞뒤 공백을 무시한 저장 검색 중복을 거부하지 않았습니다.");
+    var blankSearch = savedSearch with { Id = Guid.NewGuid(), Name = "   " };
+    await AssertThrowsAsync(() => Task.Run(() => settings.AddSavedSearch(blankSearch)),
+        "빈 저장 검색 이름을 거부하지 않았습니다.");
+    var longNameSearch = savedSearch with
+    {
+        Id = Guid.NewGuid(),
+        Name = new string('x', AppSettingsService.MaxSavedSearchNameLength + 1)
+    };
+    await AssertThrowsAsync(() => Task.Run(() => settings.AddSavedSearch(longNameSearch)),
+        "최대 길이를 넘는 저장 검색 이름을 거부하지 않았습니다.");
+    Assert(settings.SavedSearches.Count == 1,
+        "잘못된 저장 검색 검증이 설정 목록을 변경했습니다.");
     var reloadedSettings = new AppSettingsService(settingsPath);
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
+    Assert(reloadedSettings.Language == "en", "앱 언어 설정이 저장되지 않았습니다.");
+    Assert(reloadedSettings.AutoBackupEnabled && reloadedSettings.AutoBackupRetention == 3,
+        "자동 백업 설정이 저장되지 않았습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => settings.SetAutoBackup(true, 0)),
+        "잘못된 자동 백업 보관 개수를 거부하지 않았습니다.");
+    LocalizationManager.Instance.SetLanguage(reloadedSettings.Language);
+    Assert(LocalizationManager.Instance.Translate("최근 기록") == "Recent history",
+        "영어 번역을 불러오지 못했습니다.");
+    Assert(LocalizationManager.Instance.Translate("검색 실패: test") == "Search failed: test",
+        "동적 상태 메시지를 영어로 번역하지 못했습니다.");
+    LocalizationManager.Instance.SetLanguage("ko");
+    Assert(LocalizationManager.Instance.Translate("최근 기록") == "최근 기록",
+        "한국어로 되돌리지 못했습니다.");
     Assert(reloadedSettings.SavedSearches.Count == 1 &&
            reloadedSettings.SavedSearches[0] == savedSearch,
         "저장 검색이 설정 파일에서 원래 조건대로 복원되지 않았습니다.");
     reloadedSettings.RemoveSavedSearch(savedSearch.Id);
     Assert(new AppSettingsService(settingsPath).SavedSearches.Count == 0,
         "저장 검색 삭제가 설정 파일에 반영되지 않았습니다.");
+
+    var cappedSettings = new AppSettingsService(Path.Combine(testRoot, "saved-search-limit.json"));
+    for (var index = 0; index < AppSettingsService.MaxSavedSearches; index++)
+    {
+        var search = savedSearch with { Id = Guid.NewGuid(), Name = $"Search {index:D2}" };
+        Assert(cappedSettings.AddSavedSearch(search), "저장 검색이 30개 제한 전에 거부되었습니다.");
+    }
+    Assert(!cappedSettings.AddSavedSearch(savedSearch with { Id = Guid.NewGuid(), Name = "Search 30" }),
+        "저장 검색 30개 제한을 초과해 항목을 추가했습니다.");
+    cappedSettings.RemoveSavedSearch(cappedSettings.SavedSearches[0].Id);
+    Assert(cappedSettings.AddSavedSearch(savedSearch with { Id = Guid.NewGuid(), Name = "Replacement" }),
+        "저장 검색 삭제 뒤 빈 자리에 항목을 추가하지 못했습니다.");
 
     var dateRangeOptions = new DateRangeOption[]
     {
@@ -519,6 +711,108 @@ try
         "설정 저장 실패를 감지하지 못했습니다.");
     Assert(string.Equals(blockedSettings.DatabasePath, originalConfiguredPath, StringComparison.OrdinalIgnoreCase),
         "설정 저장 실패 후 메모리의 DB 경로가 디스크와 달라졌습니다.");
+    await AssertThrowsAsync(
+        () => Task.Run(() => blockedSettings.SetLanguage("en")),
+        "언어 설정 저장 실패를 감지하지 못했습니다.");
+    Assert(blockedSettings.Language == "ko", "언어 설정 저장 실패 뒤 메모리 값이 먼저 바뀌었습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetAutoBackup(true, 3)),
+        "자동 백업 설정 저장 실패를 감지하지 못했습니다.");
+    Assert(!blockedSettings.AutoBackupEnabled && blockedSettings.AutoBackupRetention == 7,
+        "자동 백업 설정 저장 실패 뒤 메모리 값이 먼저 바뀌었습니다.");
+
+    var autoSettings = new AppSettingsService(Path.Combine(testRoot, "auto-settings.json"));
+    var autoDirectory = Path.Combine(testRoot, "automatic-backups");
+    var backupNow = new DateTimeOffset(2026, 10, 1, 12, 0, 0, TimeSpan.FromHours(9));
+    await using (var autoBackup = new AutoBackupService(database, autoSettings, logger,
+                     autoDirectory, () => backupNow))
+    {
+        await autoBackup.CheckAsync();
+        Assert(!Directory.Exists(autoDirectory), "꺼진 자동 백업이 폴더를 생성했습니다.");
+        autoSettings.SetAutoBackup(true, 3);
+        await Task.WhenAll(autoBackup.CheckAsync(), autoBackup.CheckAsync());
+        var automaticFiles = Directory.GetFiles(autoDirectory, "*.fhbackup");
+        Assert(automaticFiles.Length == 1, "동시 검사에서 하루에 여러 백업을 만들었습니다.");
+        await using (var automaticDatabase = new RecentDatabase(automaticFiles[0]))
+        {
+            await automaticDatabase.InitializeAsync();
+            Assert((await automaticDatabase.GetStatsAsync()).UniqueItems ==
+                   (await database.GetStatsAsync()).UniqueItems, "자동 백업에 현재 기록이 없습니다.");
+        }
+        var manualPath = Path.Combine(autoDirectory, "manual.fhbackup");
+        var autoSafetyCopyPath = Path.Combine(autoDirectory, "findhistory.db.bak");
+        var malformedPath = Path.Combine(autoDirectory,
+            Path.GetFileName(automaticFiles[0]).Replace("20261001T030000000Z", "invalid"));
+        await File.WriteAllTextAsync(manualPath, "keep");
+        await File.WriteAllTextAsync(autoSafetyCopyPath, "keep");
+        await File.WriteAllTextAsync(malformedPath, "keep");
+        for (var day = 0; day < 4; day++)
+        {
+            backupNow = backupNow.AddDays(1);
+            await autoBackup.CheckAsync();
+        }
+        Assert(Directory.GetFiles(autoDirectory, "FindHistory-auto-*.fhbackup").Length == 4,
+            "보관 개수 정리 또는 잘못된 파일명 보호가 실패했습니다.");
+        Assert(!File.Exists(automaticFiles[0]), "가장 오래된 자동 백업이 정리되지 않았습니다.");
+        Assert(File.Exists(manualPath) && File.Exists(autoSafetyCopyPath) && File.Exists(malformedPath),
+            "자동 백업 정리가 수동 백업 또는 안전 사본을 삭제했습니다.");
+        autoSettings.SetAutoBackup(true, 1);
+        await autoBackup.CheckAsync();
+        Assert(Directory.GetFiles(autoDirectory, "FindHistory-auto-*.fhbackup").Length == 2,
+            "오늘 백업 후 보관 개수 변경이 적용되지 않았습니다.");
+        autoSettings.SetAutoBackup(false, 1);
+        backupNow = backupNow.AddDays(1);
+        await autoBackup.CheckAsync();
+        Assert(Directory.GetFiles(autoDirectory, "FindHistory-auto-*.fhbackup").Length == 2,
+            "꺼진 자동 백업이 파일을 추가했습니다.");
+        var rejectedAutomaticPath = Path.Combine(autoDirectory, "rejected.fhbackup");
+        await AssertThrowsAsync(() => database.BackupToAsync(rejectedAutomaticPath,
+                expectedDatabasePath: Path.Combine(testRoot, "different.db")),
+            "DB 전환 후 잘못된 식별자로 자동 백업을 만들었습니다.");
+        Assert(!File.Exists(rejectedAutomaticPath), "거부한 자동 백업 파일이 생성되었습니다.");
+        await autoBackup.DisposeAsync();
+        await AssertThrowsAsync(() => autoBackup.CheckAsync(), "종료된 자동 백업이 검사를 허용했습니다.");
+    }
+
+    var switchAutoSettings = new AppSettingsService(Path.Combine(testRoot, "switch-auto-settings.json"));
+    switchAutoSettings.SetAutoBackup(true, 1);
+    var firstAutoDbPath = Path.Combine(testRoot, "auto-first.db");
+    var secondAutoDbPath = Path.Combine(testRoot, "auto-second.db");
+    await using (var secondAutoDb = new RecentDatabase(secondAutoDbPath))
+        await secondAutoDb.InitializeAsync();
+    await using (var firstAutoDb = new RecentDatabase(firstAutoDbPath))
+    {
+        await firstAutoDb.InitializeAsync();
+        var switchBackupDirectory = Path.Combine(testRoot, "switch-auto-backups");
+        await using var switchAutoBackup = new AutoBackupService(firstAutoDb, switchAutoSettings, logger,
+            switchBackupDirectory, () => backupNow);
+        await switchAutoBackup.CheckAsync();
+        await firstAutoDb.UseAsync(secondAutoDbPath);
+        await switchAutoBackup.CheckAsync();
+        Assert(Directory.GetFiles(switchBackupDirectory, "*.fhbackup").Length == 2,
+            "같은 날 DB 전환 후 백업을 건너뛰거나 이전 DB 백업을 삭제했습니다.");
+        switchAutoBackup.Start();
+        await switchAutoBackup.DisposeAsync();
+    }
+
+    var failureAutoSettings = new AppSettingsService(Path.Combine(testRoot, "failure-auto-settings.json"));
+    failureAutoSettings.SetAutoBackup(true, 3);
+    var failureAutoDirectory = Path.Combine(testRoot, "failure-auto-backups");
+    await using (var failureAutoDb = new RecentDatabase(Path.Combine(testRoot, "failure-auto.db")))
+    {
+        await failureAutoDb.InitializeAsync();
+        await using var failureAutoBackup = new AutoBackupService(failureAutoDb, failureAutoSettings, logger,
+            failureAutoDirectory, () => backupNow);
+        await failureAutoBackup.CheckAsync();
+        backupNow = backupNow.AddDays(1);
+        await failureAutoBackup.CheckAsync();
+        failureAutoSettings.SetAutoBackup(true, 1);
+        backupNow = backupNow.AddDays(1);
+        await failureAutoDb.DisposeAsync();
+        await AssertThrowsAsync(() => failureAutoBackup.CheckAsync(),
+            "닫힌 DB의 자동 백업 실패를 감지하지 못했습니다.");
+        Assert(Directory.GetFiles(failureAutoDirectory, "*.fhbackup").Length == 2,
+            "자동 백업 실패 후 이전 백업을 정리했습니다.");
+    }
     var blockedSearch = savedSearch with { Id = Guid.NewGuid() };
     await AssertThrowsAsync(
         () => Task.Run(() => blockedSettings.AddSavedSearch(blockedSearch)),
@@ -547,6 +841,26 @@ try
     await AssertThrowsAsync(
         () => Task.Run(() => new AppSettingsService(inaccessibleSettingsPath)),
         "읽을 수 없는 설정 경로를 기본 DB 경로로 조용히 대체했습니다.");
+
+    var disposalDatabase = new RecentDatabase(Path.Combine(testRoot, "dispose-race", "findhistory.db"));
+    await disposalDatabase.InitializeAsync();
+    var pendingReads = Enumerable.Range(0, 32)
+        .Select(async _ =>
+        {
+            try
+            {
+                await disposalDatabase.SearchAsync(string.Empty, null);
+            }
+            catch (ObjectDisposedException)
+            {
+                // 종료와 겹친 대기 작업은 명확한 disposed 결과를 반환할 수 있다.
+            }
+        })
+        .ToArray();
+    await disposalDatabase.DisposeAsync();
+    await Task.WhenAll(pendingReads);
+    await AssertThrowsAsync(() => disposalDatabase.SearchAsync(string.Empty, null),
+        "종료된 DB에서 검색을 거부하지 않았습니다.");
 
     Console.WriteLine("PASS: 로그, 저장/복원/내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시");
 }

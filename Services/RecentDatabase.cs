@@ -7,15 +7,18 @@ using Microsoft.Data.Sqlite;
 
 namespace FindHistory.Services;
 
-public sealed class RecentDatabase : IDisposable
+public sealed class RecentDatabase : IDisposable, IAsyncDisposable
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
+    private const int MaximumActivitySqlBuckets = 366;
     private string _connectionString;
     private string _databasePath;
     private bool _ftsAvailable;
-    private readonly SemaphoreSlim _databaseGate = new(1, 1);
-    private readonly SemaphoreSlim _databasePathGate = new(1, 1);
+    private readonly OperationGate _databaseGate;
+    private readonly OperationGate _databasePathGate;
     private int _disposeState;
+    private readonly object _disposeLock = new();
+    private Task? _disposeTask;
 
     private const string UpsertSql = """
         INSERT INTO recent_items (
@@ -46,24 +49,73 @@ public sealed class RecentDatabase : IDisposable
     {
         _databasePath = Path.GetFullPath(databasePath);
         _connectionString = BuildConnectionString(_databasePath);
+        _databaseGate = new OperationGate(() => Volatile.Read(ref _disposeState) != 0);
+        _databasePathGate = new OperationGate(() => Volatile.Read(ref _disposeState) != 0);
     }
 
     public string DatabasePath => _databasePath;
 
-    public void Dispose()
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    public ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+        lock (_disposeLock)
         {
-            return;
+            if (_disposeTask is null)
+            {
+                Volatile.Write(ref _disposeState, 1);
+                _disposeTask = DisposeCoreAsync();
+            }
+
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        // 진행 중인 DB 작업과 경로 잠금 작업이 끝날 때까지 비동기로 기다린다.
+        await _databaseGate.WaitForDisposalAsync().ConfigureAwait(false);
+        try
+        {
+            await _databasePathGate.WaitForDisposalAsync().ConfigureAwait(false);
+            _databasePathGate.Release();
+        }
+        finally
+        {
+            _databaseGate.Release();
+        }
+    }
+
+    private sealed class OperationGate(Func<bool> isDisposing)
+    {
+        private readonly SemaphoreSlim _semaphore = new(1, 1);
+
+        public async Task WaitAsync(CancellationToken cancellationToken = default)
+        {
+            await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            ThrowIfDisposing();
         }
 
-        // 일반 DB 작업과 경로를 고정한 읽기 내보내기가 모두 끝난 뒤 gate를 폐기한다.
-        _databaseGate.Wait();
-        _databasePathGate.Wait();
-        _databasePathGate.Release();
-        _databaseGate.Release();
-        _databasePathGate.Dispose();
-        _databaseGate.Dispose();
+        public void Wait()
+        {
+            _semaphore.Wait();
+            ThrowIfDisposing();
+        }
+
+        public Task WaitForDisposalAsync() => _semaphore.WaitAsync();
+
+        public void Release() => _semaphore.Release();
+
+        private void ThrowIfDisposing()
+        {
+            if (!isDisposing())
+            {
+                return;
+            }
+
+            _semaphore.Release();
+            throw new ObjectDisposedException(nameof(RecentDatabase));
+        }
     }
 
     // Connection pooling stays disabled so MoveToAsync can checkpoint, close every handle,
@@ -148,7 +200,9 @@ public sealed class RecentDatabase : IDisposable
             CREATE TABLE IF NOT EXISTS history_stats (
                 id               INTEGER PRIMARY KEY CHECK (id = 1),
                 unique_items     INTEGER NOT NULL,
-                total_open_count INTEGER NOT NULL
+                total_open_count INTEGER NOT NULL,
+                stored_events    INTEGER NOT NULL DEFAULT 0,
+                estimated_events INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TRIGGER IF NOT EXISTS recent_items_stats_ai AFTER INSERT ON recent_items BEGIN
@@ -174,6 +228,7 @@ public sealed class RecentDatabase : IDisposable
             END;
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureEventStatsSchemaAsync(connection, cancellationToken);
         await MigrateSchemaAsync(connection, cancellationToken);
         _ftsAvailable = await EnsureSearchIndexAsync(connection, cancellationToken);
     }
@@ -204,13 +259,82 @@ public sealed class RecentDatabase : IDisposable
             SELECT id, last_seen_utc, source_link_path, 1
             FROM recent_items;
 
-            INSERT OR IGNORE INTO history_stats (id, unique_items, total_open_count)
-            SELECT 1, COUNT(*), COALESCE(SUM(open_count), 0) FROM recent_items;
+            INSERT OR IGNORE INTO history_stats (
+                id, unique_items, total_open_count, stored_events, estimated_events)
+            SELECT 1,
+                   COUNT(*),
+                   COALESCE(SUM(open_count), 0),
+                   (SELECT COUNT(*) FROM open_events),
+                   (SELECT COUNT(*) FROM open_events WHERE is_estimated = 1)
+            FROM recent_items;
 
-            PRAGMA user_version = 1;
+            UPDATE history_stats
+            SET stored_events = (SELECT COUNT(*) FROM open_events),
+                estimated_events = (SELECT COUNT(*) FROM open_events WHERE is_estimated = 1)
+            WHERE id = 1;
+
+            PRAGMA user_version = 2;
             """;
         await migration.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static async Task EnsureEventStatsSchemaAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var columnsCommand = connection.CreateCommand())
+        {
+            columnsCommand.CommandText = "PRAGMA table_info(history_stats);";
+            await using var reader = await columnsCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        await using var command = connection.CreateCommand();
+        var statements = new List<string>();
+        if (!columns.Contains("stored_events"))
+        {
+            statements.Add("ALTER TABLE history_stats ADD COLUMN stored_events INTEGER NOT NULL DEFAULT 0;");
+        }
+        if (!columns.Contains("estimated_events"))
+        {
+            statements.Add("ALTER TABLE history_stats ADD COLUMN estimated_events INTEGER NOT NULL DEFAULT 0;");
+        }
+
+        statements.AddRange(
+        [
+            """
+            CREATE TRIGGER IF NOT EXISTS open_events_stats_ai AFTER INSERT ON open_events BEGIN
+                UPDATE history_stats
+                SET stored_events = stored_events + 1,
+                    estimated_events = estimated_events + new.is_estimated
+                WHERE id = 1;
+            END;
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS open_events_stats_ad AFTER DELETE ON open_events BEGIN
+                UPDATE history_stats
+                SET stored_events = stored_events - 1,
+                    estimated_events = estimated_events - old.is_estimated
+                WHERE id = 1;
+            END;
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS open_events_stats_au
+            AFTER UPDATE OF is_estimated ON open_events
+            WHEN new.is_estimated <> old.is_estimated BEGIN
+                UPDATE history_stats
+                SET estimated_events = estimated_events + new.is_estimated - old.is_estimated
+                WHERE id = 1;
+            END;
+            """
+        ]);
+        command.CommandText = string.Join(Environment.NewLine, statements);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task UpsertAsync(RecentItemCandidate item, CancellationToken cancellationToken = default)
@@ -298,8 +422,31 @@ public sealed class RecentDatabase : IDisposable
         }
     }
 
-    public async Task ExportToAsync(
-        string destinationPath, string format, CancellationToken cancellationToken = default)
+    public Task ExportToAsync(
+        string destinationPath, string format, CancellationToken cancellationToken = default) =>
+        ExportCoreAsync(destinationPath, format, null, cancellationToken);
+
+    public Task ExportItemsToAsync(
+        string destinationPath,
+        string format,
+        IReadOnlyCollection<long> itemIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(itemIds);
+        var distinctIds = itemIds.Distinct().ToArray();
+        if (distinctIds.Length == 0)
+        {
+            throw new ArgumentException("내보낼 항목이 없습니다.", nameof(itemIds));
+        }
+
+        return ExportCoreAsync(destinationPath, format, distinctIds, cancellationToken);
+    }
+
+    private async Task ExportCoreAsync(
+        string destinationPath,
+        string format,
+        IReadOnlyCollection<long>? itemIds,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         var targetPath = Path.GetFullPath(destinationPath);
@@ -334,13 +481,29 @@ public sealed class RecentDatabase : IDisposable
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.Transaction = (SqliteTransaction)transaction;
-                command.CommandText = """
+                var itemFilter = string.Empty;
+                if (itemIds is not null)
+                {
+                    var parameterNames = new List<string>(itemIds.Count);
+                    var parameterIndex = 0;
+                    foreach (var itemId in itemIds)
+                    {
+                        var parameterName = $"$itemId{parameterIndex++}";
+                        parameterNames.Add(parameterName);
+                        command.Parameters.AddWithValue(parameterName, itemId);
+                    }
+
+                    itemFilter = $"WHERE r.id IN ({string.Join(", ", parameterNames)})";
+                }
+
+                command.CommandText = $"""
                     SELECT r.id, r.target_path, r.display_name, r.extension, r.item_kind,
                            r.source_link_path, r.first_seen_utc, r.last_seen_utc,
                            r.last_link_write_utc, r.open_count, r.exists_flag,
                            e.opened_utc, e.source_link_path, e.is_estimated
                     FROM recent_items AS r
                     LEFT JOIN open_events AS e ON e.recent_item_id = r.id
+                    {itemFilter}
                     ORDER BY r.id, e.opened_utc, e.id;
                     """;
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -480,8 +643,8 @@ public sealed class RecentDatabase : IDisposable
                 SELECT
                     hs.unique_items,
                     hs.total_open_count,
-                    (SELECT COUNT(*) FROM open_events),
-                    (SELECT COUNT(*) FROM open_events WHERE is_estimated = 1)
+                    hs.stored_events,
+                    hs.estimated_events
                 FROM history_stats hs
                 WHERE hs.id = 1;
                 """;
@@ -535,42 +698,111 @@ public sealed class RecentDatabase : IDisposable
         try
         {
             await using var connection = await OpenAsync(cancellationToken);
-            await using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT opened_utc, is_estimated
-                FROM open_events
-                WHERE opened_utc >= $rangeStartUtc AND opened_utc < $rangeEndUtc
-                ORDER BY opened_utc;
-                """;
-            command.Parameters.AddWithValue(
-                "$rangeStartUtc", dateRange.StartUtc.UtcDateTime.ToString("O"));
-            command.Parameters.AddWithValue(
-                "$rangeEndUtc", dateRange.EndUtc.UtcDateTime.ToString("O"));
-
             var zone = timeZone ?? TimeZoneInfo.Local;
-            var totals = new Dictionary<DateTime, (int Count, bool ContainsEstimated)>();
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            var firstLocalDate = TimeZoneInfo.ConvertTime(dateRange.StartUtc, zone).Date;
+            var lastLocalDate = TimeZoneInfo.ConvertTime(dateRange.EndUtc.AddTicks(-1), zone).Date;
+            var dayCount = (lastLocalDate - firstLocalDate).Days + 1;
+            if (dayCount > MaximumActivitySqlBuckets)
             {
-                var openedUtc = DateTimeOffset.Parse(
-                    reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-                var localDate = TimeZoneInfo.ConvertTime(openedUtc, zone).Date;
-                totals.TryGetValue(localDate, out var total);
-                totals[localDate] = (
-                    total.Count + 1,
-                    total.ContainsEstimated || reader.GetInt32(1) == 1);
+                return await ReadActivityEventsAsync(connection, dateRange, zone, cancellationToken);
             }
 
-            return totals
-                .OrderBy(pair => pair.Key)
-                .Select(pair => new DailyActivity(
-                    pair.Key, pair.Value.Count, pair.Value.ContainsEstimated))
-                .ToArray();
+            var buckets = new List<(DateTime Date, DateTimeOffset StartUtc, DateTimeOffset EndUtc)>();
+            for (var date = firstLocalDate; date <= lastLocalDate; date = date.AddDays(1))
+            {
+                var dayRange = HistoryDateRangeFactory.CreateLocalCalendarRange(
+                    date, date.AddDays(1), date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), zone);
+                var startUtc = dayRange.StartUtc > dateRange.StartUtc ? dayRange.StartUtc : dateRange.StartUtc;
+                var endUtc = dayRange.EndUtc < dateRange.EndUtc ? dayRange.EndUtc : dateRange.EndUtc;
+                if (startUtc < endUtc)
+                {
+                    buckets.Add((date, startUtc, endUtc));
+                }
+            }
+
+            if (buckets.Count == 0)
+            {
+                return [];
+            }
+
+            await using var command = connection.CreateCommand();
+            var values = new List<string>(buckets.Count);
+            for (var index = 0; index < buckets.Count; index++)
+            {
+                var bucket = buckets[index];
+                var dateName = $"$date{index}";
+                var startName = $"$start{index}";
+                var endName = $"$end{index}";
+                values.Add($"({dateName}, {startName}, {endName})");
+                command.Parameters.AddWithValue(dateName,
+                    bucket.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                command.Parameters.AddWithValue(startName,
+                    bucket.StartUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+                command.Parameters.AddWithValue(endName,
+                    bucket.EndUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+            }
+
+            command.CommandText = $"""
+                WITH day_ranges(local_date, start_utc, end_utc) AS (
+                    VALUES {string.Join(", ", values)}
+                )
+                SELECT day_ranges.local_date, COUNT(open_events.id), MAX(open_events.is_estimated)
+                FROM day_ranges
+                JOIN open_events
+                  ON open_events.opened_utc >= day_ranges.start_utc
+                 AND open_events.opened_utc < day_ranges.end_utc
+                GROUP BY day_ranges.local_date
+                ORDER BY day_ranges.local_date;
+                """;
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var results = new List<DailyActivity>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var localDate = DateTime.ParseExact(reader.GetString(0), "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None);
+                results.Add(new DailyActivity(localDate, reader.GetInt32(1), reader.GetInt32(2) == 1));
+            }
+
+            return results;
         }
         finally
         {
             _databaseGate.Release();
         }
+    }
+
+    private static async Task<IReadOnlyList<DailyActivity>> ReadActivityEventsAsync(
+        SqliteConnection connection,
+        HistoryDateRange dateRange,
+        TimeZoneInfo zone,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT opened_utc, is_estimated
+            FROM open_events
+            WHERE opened_utc >= $rangeStartUtc AND opened_utc < $rangeEndUtc
+            ORDER BY opened_utc;
+            """;
+        command.Parameters.AddWithValue(
+            "$rangeStartUtc", dateRange.StartUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue(
+            "$rangeEndUtc", dateRange.EndUtc.UtcDateTime.ToString("O", CultureInfo.InvariantCulture));
+
+        var totals = new Dictionary<DateTime, (int Count, bool ContainsEstimated)>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var openedUtc = DateTimeOffset.Parse(
+                reader.GetString(0), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+            var localDate = TimeZoneInfo.ConvertTime(openedUtc, zone).Date;
+            totals.TryGetValue(localDate, out var total);
+            totals[localDate] = (total.Count + 1, total.ContainsEstimated || reader.GetInt32(1) == 1);
+        }
+
+        return totals.OrderBy(pair => pair.Key)
+            .Select(pair => new DailyActivity(pair.Key, pair.Value.Count, pair.Value.ContainsEstimated))
+            .ToArray();
     }
 
     public async Task<bool> MoveToAsync(
@@ -651,13 +883,17 @@ public sealed class RecentDatabase : IDisposable
         }
     }
 
-    public async Task BackupToAsync(string destinationPath, CancellationToken cancellationToken = default)
+    public async Task BackupToAsync(string destinationPath, CancellationToken cancellationToken = default,
+        string? expectedDatabasePath = null)
     {
         ThrowIfDisposed();
         var targetPath = Path.GetFullPath(destinationPath);
         await _databaseGate.WaitAsync(cancellationToken);
         try
         {
+            if (expectedDatabasePath is not null && !string.Equals(
+                    expectedDatabasePath, _databasePath, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("자동 백업 준비 중 데이터베이스가 변경되었습니다.");
             if (string.Equals(targetPath, _databasePath, StringComparison.OrdinalIgnoreCase))
             {
                 throw new IOException("백업 파일은 현재 데이터베이스와 다른 경로여야 합니다.");
@@ -944,7 +1180,7 @@ public sealed class RecentDatabase : IDisposable
         }
         if (!string.IsNullOrWhiteSpace(filters?.Folder))
         {
-            var folder = Path.GetFullPath(filters.Folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var folder = NormalizeFolderFilterPath(filters.Folder);
             // 디렉터리 구분자까지 포함해 Work와 Work-old를 구분한다. LIKE 메타문자는 리터럴 처리한다.
             var prefix = folder + Path.DirectorySeparatorChar;
             var escapedPrefix = prefix.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
@@ -1041,6 +1277,22 @@ public sealed class RecentDatabase : IDisposable
         }
 
         return results;
+    }
+
+    private static string NormalizeFolderFilterPath(string folderPath)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(folderPath);
+            var root = Path.GetPathRoot(fullPath);
+            var trimmedPath = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return trimmedPath.Length == 0 ? root ?? fullPath : trimmedPath;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or
+                                   PathTooLongException or System.Security.SecurityException)
+        {
+            throw new ArgumentException("폴더 필터 경로가 유효하지 않습니다.", nameof(folderPath), ex);
+        }
     }
 
     private static async Task<HistoryStats> GetStatsCoreAsync(

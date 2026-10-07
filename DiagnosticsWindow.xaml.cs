@@ -1,4 +1,5 @@
 using System.Windows;
+using FindHistory.Localization;
 using FindHistory.ViewModels;
 
 namespace FindHistory;
@@ -39,7 +40,8 @@ public partial class DiagnosticsWindow : Window
         }
         catch (Exception ex)
         {
-            ReportTextBox.Text = $"진단 정보를 불러오지 못했습니다.\n\n{ex.Message}";
+            ReportTextBox.Text = LocalizationManager.Instance.Translate(
+                $"진단 정보를 불러오지 못했습니다.\n\n{ex.Message}");
         }
         finally
         {
@@ -59,8 +61,10 @@ public partial class DiagnosticsWindow : Window
         catch (Exception ex)
         {
             System.Windows.MessageBox.Show(
-                $"진단 정보를 클립보드에 복사하지 못했습니다.\n\n{ex.Message}",
-                "복사 실패", MessageBoxButton.OK, MessageBoxImage.Warning);
+                LocalizationManager.Instance.Translate(
+                    $"진단 정보를 클립보드에 복사하지 못했습니다.\n\n{ex.Message}"),
+                LocalizationManager.Instance.Translate("복사 실패"),
+                MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 

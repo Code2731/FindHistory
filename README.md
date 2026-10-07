@@ -27,6 +27,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 
 ### 주요 기능
 
+- 메인 화면에서 한국어/영어 UI를 선택하고 설정에 저장
 - 앱 시작 시 기존 Windows 최근 항목 가져오기
 - 최근 항목 폴더 실시간 감시 및 파일 감시 오류 시 자동 전체 재검사
 - 동일 파일의 재등장 횟수와 마지막 기록 시각 누적
@@ -127,6 +128,8 @@ dotnet publish -c Release --self-contained false -o publish
 
 같은 화면의 **백업 저장**은 SQLite 온라인 백업으로 일관된 백업 파일을 만듭니다. **백업 복원**은 유효한 FindHistory DB인지 먼저 검사하고, 현재 데이터베이스를 고유한 안전 사본으로 보관한 뒤 선택한 백업으로 복원합니다. 백업은 앱 설정 파일과 별개이므로, 저장된 검색 조건을 함께 보존하려면 `%LocalAppData%\FindHistory\settings.json`도 별도로 복사하세요.
 
+**자동 백업 사용**을 켜면 앱 실행 중 로컬 날짜 기준 하루에 한 번 백업합니다. 기본값은 꺼짐이며 보관 개수는 DB별 1~30개입니다. 설정 변경은 1분 이내에 적용됩니다. 백업은 `%LocalAppData%\FindHistory\Backups`에 저장됩니다. 보관 개수를 넘으면 해당 DB의 오래된 자동 백업만 삭제합니다. 수동 백업과 복원 전 안전 사본은 삭제하지 않습니다. DB 위치를 바꾸면 별도의 백업 목록으로 관리합니다. 자동 백업도 **백업 복원**으로 복원할 수 있습니다. 같은 드라이브의 백업은 드라이브 고장에 대비할 수 없으므로 필요한 백업은 외장 드라이브에도 복사하세요.
+
 검색 조건을 설정한 뒤 **검색 저장**을 눌러 이름을 지정하면 로컬 설정에 저장됩니다. 저장 검색 목록에서 조건을 다시 적용하거나 선택 삭제할 수 있습니다. 최근 7일 같은 상대 기간은 불러온 시점을 기준으로 계산하고, 날짜 지정 검색은 저장 당시 선택 날짜를 유지합니다.
 
 SQLite DB는 로컬 드라이브 또는 외장 드라이브에 두는 것을 권장합니다. OneDrive 같은 실시간 동기화 폴더는 여러 장치나 프로세스가 동시에 DB에 접근할 때 충돌할 수 있습니다.
@@ -190,6 +193,7 @@ Your history is not sent to an external server. It remains in the database file 
 
 ### Features
 
+- Switch the interface between Korean and English from the main window. The choice is saved locally.
 - Imports existing Windows Recent Items at startup
 - Watches the Recent Items directory in real time and automatically rescans after watcher errors
 - Tracks how often an item reappears and when it was last seen
@@ -288,6 +292,8 @@ Diagnostic logs remain local and files older than 14 days are removed at applica
 Use **Data storage** on the main screen to move the database without losing existing history, or select an existing `findhistory.db` elsewhere. The database is kept separately from the executable, so replacing or updating the publish directory does not remove your history.
 
 **Save Backup** creates a consistent SQLite online backup. **Restore Backup** validates that the selected file is a FindHistory database, preserves the current database as a uniquely named safety copy, and then restores the selected backup. Backups do not include app settings; copy `%LocalAppData%\FindHistory\settings.json` separately if you also want to preserve saved searches.
+
+Enable **automatic backups** to back up once per local calendar day while the app runs. This option is off by default. Keep 1–30 backups per database. Settings apply within one minute. Backups are saved in `%LocalAppData%\FindHistory\Backups`. Only the oldest automatic backups for that database are pruned. Manual backups and pre-restore safety copies are kept. Changing the database path starts a separate backup set. Use **Restore Backup** to restore an automatic backup. A backup on the same drive does not protect against drive failure. Copy important backups to an external drive as well.
 
 Export the complete history as CSV or JSON from **Data storage**. Both formats include item summaries and individual open events. CSV prefixes spreadsheet formula-like values for safer opening in Excel. Exporting only the current search results is not yet supported.
 
