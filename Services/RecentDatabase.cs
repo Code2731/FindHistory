@@ -422,6 +422,83 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         }
     }
 
+    public Task<ExistenceRefreshResult> RefreshExistenceBatchAsync(long afterId = 0, int limit = 200,
+        CancellationToken cancellationToken = default, Func<string, bool?>? existenceProbe = null)
+    {
+        if (afterId < 0) throw new ArgumentOutOfRangeException(nameof(afterId));
+        if (limit is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
+        return Task.Run(async () =>
+        {
+            ThrowIfDisposed();
+            var candidates = new List<(long Id, string Path, string LinkTime, bool Exists)>();
+            string databasePath;
+            await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                databasePath = _databasePath;
+                await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+                await using var command = connection.CreateCommand();
+                command.CommandText = """
+                    SELECT id, target_path, last_link_write_utc, exists_flag
+                    FROM recent_items WHERE id > $afterId ORDER BY id LIMIT $limit;
+                    """;
+                command.Parameters.AddWithValue("$afterId", afterId);
+                command.Parameters.AddWithValue("$limit", limit);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                    candidates.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3) == 1));
+            }
+            finally { _databaseGate.Release(); }
+
+            // Filesystem checks run outside the database gate. Slow drives do not hold up searches.
+            var changes = new List<(long Id, string Path, string LinkTime, bool Exists)>();
+            foreach (var item in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var exists = (existenceProbe ?? FileExistenceProbe.Check)(item.Path);
+                if (exists is not null && exists.Value != item.Exists)
+                    changes.Add(item with { Exists = exists.Value });
+            }
+            await _databaseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (!string.Equals(databasePath, _databasePath, StringComparison.OrdinalIgnoreCase))
+                    return new ExistenceRefreshResult(_databasePath, 0, 0, 0);
+                var changed = 0;
+                if (changes.Count > 0)
+                {
+                    await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+                    await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+                    await using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    // A newer capture wins over this snapshot. Update only existence, never open counts or dates.
+                    command.CommandText = """
+                        UPDATE recent_items SET exists_flag = $exists
+                        WHERE id = $id AND target_path = $path AND last_link_write_utc = $linkTime
+                        AND exists_flag <> $exists;
+                        """;
+                    var idParameter = command.Parameters.Add("$id", SqliteType.Integer);
+                    var pathParameter = command.Parameters.Add("$path", SqliteType.Text);
+                    var timeParameter = command.Parameters.Add("$linkTime", SqliteType.Text);
+                    var existsParameter = command.Parameters.Add("$exists", SqliteType.Integer);
+                    foreach (var change in changes)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        idParameter.Value = change.Id;
+                        pathParameter.Value = change.Path;
+                        timeParameter.Value = change.LinkTime;
+                        existsParameter.Value = change.Exists ? 1 : 0;
+                        changed += await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                var nextId = candidates.Count == limit ? candidates[^1].Id : 0;
+                return new ExistenceRefreshResult(databasePath, nextId, candidates.Count, changed);
+            }
+            finally { _databaseGate.Release(); }
+        }, cancellationToken);
+    }
+
     public Task ExportToAsync(
         string destinationPath, string format, CancellationToken cancellationToken = default) =>
         ExportCoreAsync(destinationPath, format, null, cancellationToken);

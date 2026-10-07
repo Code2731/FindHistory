@@ -910,6 +910,101 @@ try
         () => Task.Run(() => new AppSettingsService(inaccessibleSettingsPath)),
         "읽을 수 없는 설정 경로를 기본 DB 경로로 조용히 대체했습니다.");
 
+    var existenceDatabasePath = Path.Combine(testRoot, "existence.db");
+    await using (var existenceDatabase = new RecentDatabase(existenceDatabasePath))
+    {
+        await existenceDatabase.InitializeAsync();
+        var existenceFile = Path.Combine(testRoot, "existence-file.txt");
+        var existenceFolder = Path.Combine(testRoot, "existence-folder");
+        Directory.CreateDirectory(existenceFolder);
+        var existenceCandidate = new RecentItemCandidate(existenceFile, "existence-file.txt", "TXT", "파일",
+            "existence-source.lnk", firstDay, true);
+        await existenceDatabase.UpsertManyAsync([
+            existenceCandidate,
+            new RecentItemCandidate(existenceFolder, "existence-folder", "", "폴더", "folder.lnk", firstDay, false),
+            new RecentItemCandidate("https://example.com/existence", "existence-web", "", "웹", "web.url", firstDay, true),
+            new RecentItemCandidate("\\\\unreachable-server\\share\\file.txt", "existence-network", "TXT", "파일", "network.lnk", firstDay, true)
+        ]);
+        var beforeExistence = await existenceDatabase.GetDiagnosticsAsync();
+        var firstExistenceBatch = await existenceDatabase.RefreshExistenceBatchAsync(limit: 2);
+        Assert(firstExistenceBatch.CheckedItems == 2 && firstExistenceBatch.ChangedItems == 2 && firstExistenceBatch.NextId > 0,
+            "파일 삭제·폴더 존재 확인 또는 배치 제한이 적용되지 않았습니다.");
+        var skippedExistenceBatch = await existenceDatabase.RefreshExistenceBatchAsync(firstExistenceBatch.NextId, 2);
+        Assert(skippedExistenceBatch.ChangedItems == 0,
+            "웹 주소 또는 네트워크 경로의 상태를 자동 검사로 변경했습니다.");
+        var completedExistenceBatch = await existenceDatabase.RefreshExistenceBatchAsync(skippedExistenceBatch.NextId, 2);
+        Assert(completedExistenceBatch.NextId == 0 && completedExistenceBatch.CheckedItems == 0,
+            "존재 상태 배치 순환이 목록 끝에서 재시작하지 않았습니다.");
+        Assert((await existenceDatabase.GetDiagnosticsAsync()) == beforeExistence,
+            "존재 상태 갱신이 기록 수·열기 횟수·날짜 이벤트를 변경했습니다.");
+        Assert((await existenceDatabase.SearchWithStatsAsync("existence-file", null,
+            filters: new HistoryFilters(Exists: false))).Items.Count == 1,
+            "파일 존재 상태 변경이 검색 필터에 반영되지 않았습니다.");
+        await File.WriteAllTextAsync(existenceFile, "restored");
+        var restoredExistence = await existenceDatabase.RefreshExistenceBatchAsync();
+        Assert(restoredExistence.ChangedItems == 1 && (await existenceDatabase.SearchAsync("existence-file", null)).Single().Exists,
+            "복원된 파일의 존재 상태를 갱신하지 못했습니다.");
+        Assert(FileExistenceProbe.Check("https://example.com") is null &&
+               FileExistenceProbe.Check("relative-path.txt") is null &&
+               FileExistenceProbe.Check("\\\\unreachable-server\\share\\file.txt") is null,
+            "네트워크·웹·상대 경로를 건너뛰지 않았습니다.");
+        var unknownExistence = await existenceDatabase.RefreshExistenceBatchAsync(existenceProbe: _ => null);
+        Assert(unknownExistence.ChangedItems == 0,
+            "확인할 수 없는 경로를 없는 파일로 처리했습니다.");
+        // A fresh shortcut capture must win over an older filesystem snapshot.
+        var newerCaptureApplied = false;
+        await existenceDatabase.RefreshExistenceBatchAsync(existenceProbe: path =>
+        {
+            if (path != existenceFile) return null;
+            existenceDatabase.UpsertAsync(existenceCandidate with { LinkWriteTime = firstDay.AddSeconds(1) })
+                .GetAwaiter().GetResult();
+            newerCaptureApplied = true;
+            return false;
+        });
+        Assert(newerCaptureApplied && (await existenceDatabase.SearchAsync("existence-file", null)).Single().Exists,
+            "오래된 존재 상태 검사가 최신 수집 결과를 덮어썼습니다.");
+        using (var cancelledExistence = new CancellationTokenSource())
+        {
+            cancelledExistence.Cancel();
+            await AssertThrowsAsync(() => existenceDatabase.RefreshExistenceBatchAsync(cancellationToken: cancelledExistence.Token),
+                "취소된 존재 상태 검사 작업이 실행되었습니다.");
+        }
+        await AssertThrowsAsync(() => existenceDatabase.RefreshExistenceBatchAsync(limit: 0),
+            "잘못된 존재 상태 배치 크기를 거부하지 않았습니다.");
+
+        var switchedExistencePath = Path.Combine(testRoot, "existence-switched.db");
+        await using (var switchedExistenceDatabase = new RecentDatabase(switchedExistencePath))
+        {
+            await switchedExistenceDatabase.InitializeAsync();
+            await switchedExistenceDatabase.UpsertAsync(existenceCandidate);
+        }
+        var switchedDuringProbe = false;
+        var switchedResult = await existenceDatabase.RefreshExistenceBatchAsync(existenceProbe: _ =>
+        {
+            if (!switchedDuringProbe)
+            {
+                existenceDatabase.UseAsync(switchedExistencePath).GetAwaiter().GetResult();
+                switchedDuringProbe = true;
+            }
+            return false;
+        });
+        Assert(switchedResult.ChangedItems == 0 && switchedResult.NextId == 0 &&
+               (await existenceDatabase.SearchAsync("existence-file", null)).Single().Exists,
+            "DB 전환 후 이전 DB의 검사 결과를 적용했습니다.");
+        File.Delete(existenceFile);
+        var existenceChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using (var existenceMonitor = new FileExistenceMonitor(existenceDatabase, logger))
+        {
+            existenceMonitor.HistoryChanged += (_, _) => existenceChanged.TrySetResult();
+            existenceMonitor.Start();
+            await existenceChanged.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await existenceMonitor.DisposeAsync();
+            await existenceMonitor.DisposeAsync();
+            Assert(!(await existenceDatabase.SearchAsync("existence-file", null)).Single().Exists,
+                "백그라운드 존재 상태 갱신 또는 변경 알림이 동작하지 않았습니다.");
+        }
+    }
+
     var storageDatabasePath = Path.Combine(testRoot, "storage", "findhistory.db");
     await using (var storageDatabase = new RecentDatabase(storageDatabasePath))
     {
@@ -1003,7 +1098,7 @@ try
     await AssertThrowsAsync(() => disposalDatabase.SearchAsync(string.Empty, null),
         "종료된 DB에서 검색을 거부하지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장/복원/내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시");
+    Console.WriteLine("PASS: 로그, 저장/복원/필터 내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시, 존재 상태 갱신, 저장 공간 정리");
 }
 finally
 {

@@ -1223,6 +1223,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             ScheduleActivityReload();
         }, "recent history refresh");
 
+    public void NotifyExistenceChanged() =>
+        PostToUi(ScheduleReload, "file existence refresh");
+
     private void OnMonitorError(object? sender, string message)
     {
         PostToUi(() => StatusText = $"감시 오류: {message}", "monitor error notification");

@@ -14,6 +14,7 @@ public partial class App : System.Windows.Application
     private RecentDatabase? _database;
     private RecentItemsMonitor? _monitor;
     private AutoBackupService? _autoBackup;
+    private FileExistenceMonitor? _existenceMonitor;
     private MainViewModel? _viewModel;
     private MainWindow? _window;
     private Forms.NotifyIcon? _trayIcon;
@@ -99,6 +100,9 @@ public partial class App : System.Windows.Application
             {
                 _autoBackup = new AutoBackupService(_database, settings, _log);
                 _autoBackup.Start();
+                _existenceMonitor = new FileExistenceMonitor(_database, _log);
+                _existenceMonitor.HistoryChanged += OnExistenceChanged;
+                _existenceMonitor.Start();
             }
 
             if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
@@ -153,6 +157,8 @@ public partial class App : System.Windows.Application
             await ExitApplicationAsync();
         }
     }
+
+    private void OnExistenceChanged(object? sender, EventArgs e) => _viewModel?.NotifyExistenceChanged();
 
     private void RegisterUnhandledExceptionLogging()
     {
@@ -315,6 +321,13 @@ public partial class App : System.Windows.Application
         }
         finally
         {
+            if (_existenceMonitor is not null)
+            {
+                _existenceMonitor.HistoryChanged -= OnExistenceChanged;
+                try { await _existenceMonitor.DisposeAsync(); }
+                catch (Exception ex) { _log.Error("Stopping file existence refresh failed.", ex); }
+                _existenceMonitor = null;
+            }
             if (_autoBackup is not null)
             {
                 try { await _autoBackup.DisposeAsync(); }
