@@ -301,7 +301,12 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock Text="{loc:Translate '최근 기록'}" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock Text="{loc:Translate '최근 기록'}" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <CheckBox Content="{loc:Translate '폴더별 보기'}" Margin="20,0,0,0" VerticalAlignment="Center"
+                          IsChecked="{Binding FolderGroupingEnabled, Mode=TwoWay}"
+                          ToolTip="{loc:Translate '현재 표시된 결과를 상위 폴더별로 묶습니다. 검색 조건과 내보내기 범위는 바꾸지 않습니다.'}" />
+            </StackPanel>
             <TextBlock Grid.Column="1" Text="{Binding SummaryText}"
                        Style="{StaticResource SecondaryText}" FontSize="12" VerticalAlignment="Center" />
         </Grid>
@@ -310,7 +315,7 @@
                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" ClipToBounds="True">
             <Grid>
                 <DataGrid x:Name="ResultsGrid"
-                          ItemsSource="{Binding Items}" SelectedItem="{Binding SelectedItem}"
+                          ItemsSource="{Binding ResultsView}" SelectedItem="{Binding SelectedItem}"
                           AutoGenerateColumns="False" IsReadOnly="True" HeadersVisibility="Column"
                           GridLinesVisibility="None" SelectionMode="Single" SelectionUnit="FullRow"
                           Background="Transparent" Foreground="{StaticResource TextBrush}"
@@ -319,7 +324,30 @@
                           HorizontalScrollBarVisibility="Disabled"
                           EnableRowVirtualization="True" EnableColumnVirtualization="True"
                           VirtualizingPanel.IsVirtualizing="True"
+                          VirtualizingPanel.IsVirtualizingWhenGrouping="True"
                           VirtualizingPanel.VirtualizationMode="Recycling">
+                    <DataGrid.GroupStyle>
+                        <GroupStyle>
+                            <GroupStyle.HeaderTemplate>
+                                <DataTemplate>
+                                    <Border Background="{StaticResource AccentContainerBrush}" Padding="14,8"
+                                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Name}" ToolTip="{Binding Name}"
+                                                       Foreground="{StaticResource TextBrush}" FontSize="12"
+                                                       FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Grid.Column="1" Text="{Binding ItemCount, StringFormat='({0:N0})'}"
+                                                       Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" Margin="12,0,0,0" />
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </GroupStyle.HeaderTemplate>
+                        </GroupStyle>
+                    </DataGrid.GroupStyle>
                     <DataGrid.Resources>
                         <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}"
                                          Color="#143246" />

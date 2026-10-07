@@ -38,6 +38,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _initialized;
     private bool _disposed;
     private IReadOnlyList<RecentItem> _items = [];
+    private ICollectionView? _resultsView;
     private IReadOnlyList<ActivityWeek> _activityWeeks = [];
     private string _activityPeriodText = "최근 활동 준비 중";
     private string _activitySummaryText = string.Empty;
@@ -237,7 +238,42 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public IReadOnlyList<RecentItem> Items
     {
         get => _items;
-        private set => SetField(ref _items, value);
+        private set
+        {
+            if (SetField(ref _items, value)) RebuildResultsView();
+        }
+    }
+
+    public ICollectionView ResultsView => _resultsView ??= FolderGrouping.CreateView(Items, FolderGroupingEnabled);
+
+    public bool FolderGroupingEnabled
+    {
+        get => _settings.FolderGroupingEnabled;
+        set
+        {
+            if (value == _settings.FolderGroupingEnabled) return;
+            try
+            {
+                _settings.SetFolderGrouping(value);
+                RebuildResultsView();
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Saving folder grouping failed.", ex);
+                StatusText = LocalizationManager.Instance.Format(
+                    "폴더 그룹화 설정 저장 실패: {0}", "Saving folder grouping failed: {0}", ex.Message);
+            }
+            OnPropertyChanged();
+        }
+    }
+
+    private void RebuildResultsView()
+    {
+        var selectedId = SelectedItem?.Id;
+        _resultsView = FolderGrouping.CreateView(Items, FolderGroupingEnabled);
+        OnPropertyChanged(nameof(ResultsView));
+        SelectedItem = selectedId is null ? null : Items.FirstOrDefault(item => item.Id == selectedId);
+        OnPropertyChanged(nameof(SelectedItem));
     }
 
     public IReadOnlyList<ActivityWeek> ActivityWeeks

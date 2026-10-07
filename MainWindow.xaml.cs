@@ -20,6 +20,15 @@ public partial class MainWindow : Window
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        DependencyObject? source = e.OriginalSource as DependencyObject;
+        while (source is not null && source is not System.Windows.Controls.DataGridRow &&
+               !ReferenceEquals(source, ResultsGrid))
+        {
+            source = source is FrameworkContentElement content
+                ? content.Parent
+                : System.Windows.Media.VisualTreeHelper.GetParent(source);
+        }
+        if (source is not System.Windows.Controls.DataGridRow) return;
         if (_viewModel.OpenCommand.CanExecute(null))
         {
             _viewModel.OpenCommand.Execute(null);

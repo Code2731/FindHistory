@@ -23,6 +23,15 @@ public sealed class AppSettingsService
 
     public string Language => _settings.Language;
 
+    public bool FolderGroupingEnabled => _settings.FolderGroupingEnabled;
+
+    public void SetFolderGrouping(bool enabled)
+    {
+        var updatedSettings = _settings with { FolderGroupingEnabled = enabled };
+        Save(updatedSettings);
+        _settings = updatedSettings;
+    }
+
     public bool AutoBackupEnabled => _settings.AutoBackupEnabled;
     public int AutoBackupRetention => Math.Clamp(_settings.AutoBackupRetention, 1, 30);
 
@@ -144,5 +153,6 @@ public sealed class AppSettingsService
         public string Language { get; init; } = "ko";
         public bool AutoBackupEnabled { get; init; }
         public int AutoBackupRetention { get; init; } = 7;
+        public bool FolderGroupingEnabled { get; init; }
     }
 }

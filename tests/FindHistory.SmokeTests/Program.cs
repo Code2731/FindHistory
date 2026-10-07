@@ -703,6 +703,8 @@ try
     Assert(settings.Language == "ko", "새 설정의 기본 언어가 한국어가 아닙니다.");
     Assert(!settings.AutoBackupEnabled && settings.AutoBackupRetention == 7,
         "자동 백업은 기본으로 꺼져 있어야 합니다.");
+    Assert(!settings.FolderGroupingEnabled, "폴더 그룹화가 기본으로 켜져 있습니다.");
+    settings.SetFolderGrouping(true);
     settings.SetAutoBackup(true, 3);
     settings.SetDatabasePath(movedPath);
     settings.SetLanguage("en");
@@ -728,6 +730,7 @@ try
     Assert(string.Equals(reloadedSettings.DatabasePath, movedPath, StringComparison.OrdinalIgnoreCase),
         "DB 위치 설정이 저장되지 않았습니다.");
     Assert(reloadedSettings.Language == "en", "앱 언어 설정이 저장되지 않았습니다.");
+    Assert(reloadedSettings.FolderGroupingEnabled, "폴더별 보기 설정이 저장되지 않았습니다.");
     Assert(reloadedSettings.AutoBackupEnabled && reloadedSettings.AutoBackupRetention == 3,
         "자동 백업 설정이 저장되지 않았습니다.");
     await AssertThrowsAsync(() => Task.Run(() => settings.SetAutoBackup(true, 0)),
@@ -783,6 +786,10 @@ try
         () => Task.Run(() => blockedSettings.SetLanguage("en")),
         "언어 설정 저장 실패를 감지하지 못했습니다.");
     Assert(blockedSettings.Language == "ko", "언어 설정 저장 실패 뒤 메모리 값이 먼저 바뀌었습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetFolderGrouping(true)),
+        "폴더 그룹화 설정 저장 실패를 감지하지 못했습니다.");
+    Assert(!blockedSettings.FolderGroupingEnabled,
+        "폴더 그룹화 설정 저장 실패 뒤 메모리 값이 먼저 바뀌었습니다.");
     await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetAutoBackup(true, 3)),
         "자동 백업 설정 저장 실패를 감지하지 못했습니다.");
     Assert(!blockedSettings.AutoBackupEnabled && blockedSettings.AutoBackupRetention == 7,
@@ -909,6 +916,42 @@ try
     await AssertThrowsAsync(
         () => Task.Run(() => new AppSettingsService(inaccessibleSettingsPath)),
         "읽을 수 없는 설정 경로를 기본 DB 경로로 조용히 대체했습니다.");
+
+    var groupingBaseItem = new RecentItem(1, @"D:\GroupTest\Work\one.txt", "one.txt", "TXT", "파일",
+        "one.lnk", firstDay, firstDay, 1, true);
+    var groupingItems = new RecentItem[]
+    {
+        groupingBaseItem,
+        groupingBaseItem with { Id = 2, TargetPath = @"d:\grouptest\WORK\two.txt" },
+        groupingBaseItem with { Id = 3, TargetPath = @"D:\GroupTest\Work-old\three.txt" },
+        groupingBaseItem with { Id = 4, TargetPath = "https://example.com/page" },
+        groupingBaseItem with { Id = 5, TargetPath = "http://example.org/page" },
+        groupingBaseItem with { Id = 6, TargetPath = "relative.txt" }
+    };
+    var groupedView = FolderGrouping.CreateView(groupingItems, true);
+    var folderGroups = groupedView.Groups!.Cast<System.Windows.Data.CollectionViewGroup>().ToArray();
+    Assert(folderGroups.Length == 4 && folderGroups.Sum(group => group.ItemCount) == groupingItems.Length,
+        "폴더 그룹화가 결과를 누락하거나 경로 대소문자를 별도 그룹으로 나눴습니다.");
+    Assert(folderGroups.Single(group => string.Equals((string)group.Name, @"D:\GroupTest\Work",
+        StringComparison.OrdinalIgnoreCase)).ItemCount == 2,
+        "같은 상위 폴더의 항목을 한 그룹으로 묶지 못했습니다.");
+    Assert(folderGroups.Single(group => (string)group.Name == "웹 주소").ItemCount == 2,
+        "웹 주소를 별도 그룹으로 묶지 못했습니다.");
+    var ungroupedView = FolderGrouping.CreateView(groupingItems, false);
+    Assert(ungroupedView.Groups is null && ungroupedView.Cast<RecentItem>().Select(item => item.Id)
+        .SequenceEqual(groupingItems.Select(item => item.Id)), "기본 목록 보기가 원래 순서를 유지하지 못했습니다.");
+    Assert(FolderGrouping.GetFolderName(@"D:\") == @"D:\" &&
+           FolderGrouping.GetFolderName(@"\\server\share\") == @"\\server\share\" &&
+           FolderGrouping.GetFolderName(@"D:\GroupTest\Work\SubFolder\") == @"D:\GroupTest\Work" &&
+           FolderGrouping.GetFolderName("invalid\0path") == "기타 경로",
+        "루트·폴더 항목·잘못된 경로의 그룹명이 올바르지 않습니다.");
+    Assert(FolderGrouping.CreateView(Array.Empty<RecentItem>(), true).IsEmpty,
+        "빈 검색 결과 그룹화가 비어 있지 않습니다.");
+    LocalizationManager.Instance.SetLanguage("en");
+    Assert(FolderGrouping.GetFolderName("https://example.com") == "Web addresses" &&
+           FolderGrouping.GetFolderName("relative.txt") == "Other paths",
+        "폴더 그룹 이름이 영어로 번역되지 않았습니다.");
+    LocalizationManager.Instance.SetLanguage("ko");
 
     var existenceDatabasePath = Path.Combine(testRoot, "existence.db");
     await using (var existenceDatabase = new RecentDatabase(existenceDatabasePath))

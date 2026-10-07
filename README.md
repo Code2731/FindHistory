@@ -39,6 +39,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 로컬 파일·폴더의 존재 상태를 백그라운드에서 순차 갱신
 - 검색어와 필터 조합을 최대 30개까지 이름을 붙여 로컬에 저장하고 다시 불러오기
 - 파일 열기 및 파일 탐색기에서 위치 열기
+- 검색 결과의 폴더별 그룹 보기와 표시 항목 수 확인
 - 현재 DB를 다른 폴더로 이동하거나 기존 `findhistory.db` 선택
 - 창을 닫은 뒤에도 시스템 트레이에서 백그라운드 기록
 - 선택적인 Windows 로그인 시 자동 실행
@@ -79,6 +80,12 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 앱은 시작 시 최대 200개 기록을 검사합니다. 이후 30초마다 최대 200개씩 순서대로 검사합니다. 목록 끝에 도달하면 처음부터 다시 검사합니다. 파일 삭제·복원 또는 폴더 존재 상태가 바뀌면 결과표와 존재 상태 필터를 갱신합니다. 열기 횟수와 날짜 기록은 변경하지 않습니다. 기록이 많으면 전체 상태 갱신에 시간이 걸립니다. 화면의 상태는 마지막으로 확인한 값이며 실시간 보장은 아닙니다.
 
 웹 주소, UNC 경로, 네트워크 드라이브, 검사 대상 자체가 링크인 경로는 자동 검사에서 제외합니다. 연결되지 않은 드라이브와 접근 오류도 기존 상태를 유지합니다. 웹 주소는 수집 시의 상태를 유지하며 접속 가능 여부를 검사하지 않습니다. 자동 검사는 백그라운드에서 실행하며 파일 확인 중에는 DB 잠금을 잡지 않습니다.
+
+### 폴더별 보기
+
+**최근 기록** 옆의 **폴더별 보기**를 켜면 현재 표시된 결과를 상위 폴더별로 묶습니다. 그룹 제목에는 폴더 경로와 표시 항목 수를 보여 줍니다. 경로의 대소문자는 구분하지 않습니다. 웹 주소와 기타 경로는 별도 그룹으로 표시합니다. 폴더 항목 자체는 해당 폴더의 상위 폴더에 포함합니다. 그룹 안의 항목 순서는 기존 결과 순서를 유지합니다. 기본값은 꺼짐이며 설정은 재시작 후에도 유지됩니다.
+
+그룹화는 검색 조건과 내보내기 범위를 바꾸지 않습니다. 그룹의 항목 수는 전체 DB 개수가 아니라 화면에 표시된 최대 1,000개 결과 기준입니다. 사용자 지정 프로젝트 그룹과 그룹 접기·펼치기는 아직 제공하지 않습니다.
 
 ### 다운로드
 
@@ -212,6 +219,7 @@ Your history is not sent to an external server. It remains in the database file 
 - All time / Today / Last 7 days / Last 30 days / Last year / Specific date filters
 - Combines extension, last recorded existence, and folder (including descendants) with date and search terms; removable chips show active filters
 - Refreshes local file and folder existence in background batches
+- Groups displayed search results by parent folder with per-group item counts
 - Saves up to 30 named search combinations locally and restores them later
 - Opens a file or reveals its location in File Explorer
 - Moves the current database or switches to an existing `findhistory.db`
@@ -326,6 +334,12 @@ Collected file names, paths, dates, and counts remain only in the selected local
 The app checks up to 200 records at startup, then up to 200 every 30 seconds. It checks records in order and restarts at the beginning after reaching the end. File deletion, restoration, and folder status changes update the results and existence filter. Open counts and date events are preserved. Large histories take longer to refresh. The displayed status is the last checked value, not a real-time guarantee.
 
 Web addresses, UNC paths, network drives, and targets that are themselves links are skipped. Offline drives and access errors preserve the stored status. Web addresses retain their capture-time status; no availability request is made. Filesystem checks run in the background without holding the database gate.
+
+### Folder grouping
+
+Enable **Group by folder** beside **Recent history** to group displayed results by parent folder. Group headers show the folder path and displayed item count. Path matching ignores case. Web addresses and other paths have separate groups. A folder entry belongs to its parent folder's group. Items retain their original order within each group. This setting is off by default and is preserved across restarts.
+
+Grouping does not change search filters or export scope. Group counts describe the displayed results, limited to 1,000 items, not the entire database. Custom project groups and collapsible groups are not supported yet.
 
 ### Tests and performance
 

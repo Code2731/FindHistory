@@ -26,6 +26,7 @@ public sealed record RecentItem(
     bool IsEstimatedHistory = false)
 {
     public string LastSeenText => LastSeen.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
+    public string FolderGroupName => FolderGrouping.GetFolderName(TargetPath);
     public string ItemKindText => LocalizationManager.Instance.Translate(ItemKind);
     public string CountText => LocalizationManager.Instance.Format("{0:N0}회", "{0:N0} opens", OpenCount);
     public string ExistsText => Exists ? string.Empty : LocalizationManager.Instance.Translate("찾을 수 없음");
