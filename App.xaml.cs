@@ -54,7 +54,12 @@ public partial class App : System.Windows.Application
 
         try
         {
-            var settings = new AppSettingsService();
+            var screenshotSettingsIndex = isScreenshotRun
+                ? Array.FindIndex(e.Args, arg => arg.Equals("--settings", StringComparison.OrdinalIgnoreCase))
+                : -1;
+            var settings = new AppSettingsService(
+                screenshotSettingsIndex >= 0 && screenshotSettingsIndex + 1 < e.Args.Length
+                    ? e.Args[screenshotSettingsIndex + 1] : null);
             LocalizationManager.Instance.SetLanguage(settings.Language);
             var databaseIndex = Array.FindIndex(e.Args,
                 arg => arg.Equals("--database", StringComparison.OrdinalIgnoreCase));
@@ -64,9 +69,10 @@ public partial class App : System.Windows.Application
             _database = new RecentDatabase(databasePath);
             await _database.InitializeAsync();
 
-            _monitor = new RecentItemsMonitor(_database, new ShortcutResolver(), log: _log);
+            _monitor = new RecentItemsMonitor(_database, new ShortcutResolver(), log: _log, settings: settings);
             _viewModel = new MainViewModel(
                 _database, _monitor, new AutoStartService(), settings, _log);
+            _viewModel.PropertyChanged += OnRecordingPropertyChanged;
             _window = new MainWindow(_viewModel);
             _window.Closing += OnWindowClosing;
 
@@ -109,6 +115,8 @@ public partial class App : System.Windows.Application
             {
                 var settingsWindow = new StorageSettingsWindow(_viewModel);
                 settingsWindow.Show();
+                if (e.Args.Contains("--scroll-settings-bottom", StringComparer.OrdinalIgnoreCase))
+                    settingsWindow.PrepareBottomScreenshot();
                 settingsWindow.UpdateLayout();
                 await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
                 SaveScreenshot(settingsWindow, e.Args[settingsScreenshotIndex + 1]);
@@ -225,7 +233,8 @@ public partial class App : System.Windows.Application
         _trayApplicationIcon = LoadTrayIcon();
         _trayIcon = new Forms.NotifyIcon
         {
-            Text = "FindHistory - " + LocalizationManager.Instance.Translate("최근 항목 기록 중"),
+            Text = "FindHistory - " + LocalizationManager.Instance.Translate(
+                _monitor?.IsRecordingPaused == true ? "기록 일시정지 중" : "최근 항목 기록 중"),
             Icon = _trayApplicationIcon,
             Visible = true,
             ContextMenuStrip = menu
@@ -241,13 +250,19 @@ public partial class App : System.Windows.Application
         }
     }
 
+    private void OnRecordingPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MainViewModel.IsRecordingPaused)) UpdateTrayLanguage();
+    }
+
     private void UpdateTrayLanguage()
     {
         _trayOpenItem?.Text = LocalizationManager.Instance.Translate("FindHistory 열기");
         _trayExitItem?.Text = LocalizationManager.Instance.Translate("종료");
         if (_trayIcon is not null)
         {
-            _trayIcon.Text = "FindHistory - " + LocalizationManager.Instance.Translate("최근 항목 기록 중");
+            _trayIcon.Text = "FindHistory - " + LocalizationManager.Instance.Translate(
+                _monitor?.IsRecordingPaused == true ? "기록 일시정지 중" : "최근 항목 기록 중");
         }
     }
 
@@ -307,6 +322,7 @@ public partial class App : System.Windows.Application
         _log.Information("FindHistory shutdown requested.");
         try
         {
+            if (_viewModel is not null) _viewModel.PropertyChanged -= OnRecordingPropertyChanged;
             _viewModel?.Dispose();
             _viewModel = null;
             if (_monitor is not null)

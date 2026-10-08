@@ -30,6 +30,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 메인 화면에서 한국어/영어 UI를 선택하고 설정에 저장
 - 앱 시작 시 기존 Windows 최근 항목 가져오기
 - 최근 항목 폴더 실시간 감시 및 파일 감시 오류 시 자동 전체 재검사
+- 재시작 후에도 유지되는 기록 일시정지와 제외 폴더 설정
 - 동일 파일의 재등장 횟수와 마지막 기록 시각 누적
 - 개별 열기 이벤트를 날짜별로 보존하고 특정 날짜만 조회
 - 최근 16주의 날짜별 활동량을 히트맵으로 확인하고 날짜를 눌러 바로 필터링
@@ -86,6 +87,12 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 **최근 기록** 옆의 **폴더별 보기**를 켜면 현재 표시된 결과를 상위 폴더별로 묶습니다. 그룹 제목에는 폴더 경로와 표시 항목 수를 보여 줍니다. 경로의 대소문자는 구분하지 않습니다. 웹 주소와 기타 경로는 별도 그룹으로 표시합니다. 폴더 항목 자체는 해당 폴더의 상위 폴더에 포함합니다. 그룹 안의 항목 순서는 기존 결과 순서를 유지합니다. 기본값은 꺼짐이며 설정은 재시작 후에도 유지됩니다.
 
 그룹화는 검색 조건과 내보내기 범위를 바꾸지 않습니다. 그룹의 항목 수는 전체 DB 개수가 아니라 화면에 표시된 최대 1,000개 결과 기준입니다. 사용자 지정 프로젝트 그룹과 그룹 접기·펼치기는 아직 제공하지 않습니다.
+
+### 기록 제어
+
+메인 화면 또는 **데이터 저장소 → 기록 수집 설정**에서 **기록 일시정지**를 누릅니다. 일시정지 상태는 앱 재시작 후에도 유지됩니다. **기록 다시 시작**을 누르면 다시 시작한 시각 이후에 열린 항목부터 수집합니다. 일시정지 중 열린 항목은 다음 실행이나 전체 스캔에서도 가져오지 않습니다. 기존 기록의 검색·내보내기, 자동 백업, 파일 존재 상태 갱신은 계속 사용할 수 있습니다.
+
+**제외 폴더 추가**로 최대 50개 폴더를 지정할 수 있습니다. 해당 폴더와 하위 폴더의 새 기록은 실시간 수집과 전체 스캔에서 제외됩니다. 기존 기록은 삭제하지 않습니다. **선택 해제** 후에는 수집 조건을 만족하는 최근 항목을 다시 가져올 수 있습니다. 제외 조건은 바로가기의 대상 경로를 기준으로 비교합니다. 다른 경로의 링크가 같은 폴더를 가리키는 경우까지 차단하지는 않습니다. 이 설정은 FindHistory의 수집만 제어하며 Windows의 최근 항목 기록은 끄지 않습니다.
 
 ### 다운로드
 
@@ -212,6 +219,7 @@ Your history is not sent to an external server. It remains in the database file 
 - Switch the interface between Korean and English from the main window. The choice is saved locally.
 - Imports existing Windows Recent Items at startup
 - Watches the Recent Items directory in real time and automatically rescans after watcher errors
+- Saves recording pause and excluded-folder settings across restarts
 - Tracks how often an item reappears and when it was last seen
 - Preserves individual open events and filters them by an exact calendar date
 - Shows the last 16 weeks in an activity heatmap and filters by a clicked date
@@ -257,6 +265,12 @@ Date history is subject to limitations in the Windows Recent Items source:
 - When an older FindHistory database is upgraded, each existing `last_seen` value is migrated as an **estimated event**.
 
 For the most accurate date history, enable **background startup at Windows sign-in**.
+
+### Recording controls
+
+Choose **Pause recording** in the main window or **Storage → Recording settings**. Pause stays active across app restarts. **Resume recording** collects items opened after the resume time. Items opened during the pause are not imported by later startups or full scans. Search, export, automatic backups, and file-existence updates remain available.
+
+Use **Add excluded folder** to select up to 50 folders. New records for each folder and its descendants are excluded from live capture and full scans. Existing history is not deleted. **Remove exclusion** can import recent items that meet the recording conditions. Exclusions compare the shortcut target path. They do not block another path that links to the same folder. These controls affect FindHistory only. They do not disable Windows Recent Items.
 
 ### Download
 

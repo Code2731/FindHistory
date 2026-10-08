@@ -12,6 +12,9 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
     private readonly ShortcutResolver _resolver;
     private readonly AppLogService? _log;
     private readonly string _recentFolder;
+    private readonly AppSettingsService? _settings;
+    private readonly SemaphoreSlim _recordingGate = new(1, 1);
+    private volatile RecordingConfiguration _configuration;
     private readonly SemaphoreSlim _scanGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _pendingCaptures =
@@ -46,12 +49,61 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         RecentDatabase database,
         ShortcutResolver resolver,
         string? recentFolder = null,
-        AppLogService? log = null)
+        AppLogService? log = null,
+        AppSettingsService? settings = null)
     {
         _database = database;
         _resolver = resolver;
         _log = log;
         _recentFolder = recentFolder ?? Environment.GetFolderPath(Environment.SpecialFolder.Recent);
+        _settings = settings;
+        _configuration = settings?.GetRecordingConfiguration() ?? new RecordingConfiguration(false, [], null);
+    }
+
+    public bool IsRecordingPaused => _configuration.Paused;
+
+    public async Task RefreshConfigurationAsync()
+    {
+        ThrowIfStopped();
+        await _recordingGate.WaitAsync(_lifetimeCancellation.Token);
+        try
+        {
+            _lifetimeCancellation.Token.ThrowIfCancellationRequested();
+            _configuration = _settings?.GetRecordingConfiguration() ?? _configuration;
+            foreach (var pending in _pendingCaptures.Values) CancelSilently(pending);
+            lock (_watcherLock)
+            {
+                if (_watcher is not null)
+                {
+                    var enabled = !IsRecordingPaused && Volatile.Read(ref _stopping) == 0;
+                    _watcher.EnableRaisingEvents = enabled;
+                    Volatile.Write(ref _watcherActive, enabled ? 1 : 0);
+                }
+            }
+        }
+        finally { _recordingGate.Release(); }
+        DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
+        if (!IsRecordingPaused && Volatile.Read(ref _started) != 0 && Volatile.Read(ref _stopping) == 0)
+            Track(RescanAfterConfigurationAsync());
+    }
+
+    private bool CanRecord(RecentItemCandidate item)
+    {
+        var configuration = _configuration;
+        return !configuration.Paused &&
+               (configuration.ResumeAfterUtc is null || item.LinkWriteTime > configuration.ResumeAfterUtc) &&
+               !ExcludedFolderPathRules.IsExcluded(item.TargetPath, configuration.ExcludedFolders);
+    }
+
+    private async Task RescanAfterConfigurationAsync()
+    {
+        try { await ScanAsync(_lifetimeCancellation.Token); }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            RecordError("Recording configuration rescan failed.", ex);
+            MonitorError?.Invoke(this, ex.Message);
+        }
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -82,13 +134,21 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, _lifetimeCancellation.Token);
         var token = linkedCancellation.Token;
+        if (IsRecordingPaused) return 0;
 
         await _scanGate.WaitAsync(token);
         var startedTimestamp = Stopwatch.GetTimestamp();
         try
         {
             var items = await Task.Run(() => ResolveExistingItems(token), token);
-            await _database.UpsertManyAsync(items, token);
+            await _recordingGate.WaitAsync(token);
+            try
+            {
+                if (IsRecordingPaused) return 0;
+                items.RemoveAll(item => !CanRecord(item));
+                await _database.UpsertManyAsync(items, token);
+            }
+            finally { _recordingGate.Release(); }
             lock (_diagnosticsLock)
             {
                 _lastScanCompletedUtc = DateTimeOffset.UtcNow;
@@ -140,8 +200,9 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
 
             var previous = _watcher;
             _watcher = watcher;
-            watcher.EnableRaisingEvents = true;
-            Volatile.Write(ref _watcherActive, 1);
+            var enabled = !IsRecordingPaused;
+            watcher.EnableRaisingEvents = enabled;
+            Volatile.Write(ref _watcherActive, enabled ? 1 : 0);
             previous?.Dispose();
         }
         DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
@@ -160,7 +221,7 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             var item = _resolver.Resolve(path);
-            if (item is not null)
+            if (item is not null && CanRecord(item))
             {
                 items.Add(item);
             }
@@ -170,7 +231,7 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
 
     private void OnShortcutChanged(object sender, FileSystemEventArgs e)
     {
-        if (!IsSupportedShortcut(e.FullPath) || Volatile.Read(ref _stopping) != 0)
+        if (!IsSupportedShortcut(e.FullPath) || Volatile.Read(ref _stopping) != 0 || IsRecordingPaused)
         {
             return;
         }
@@ -226,8 +287,15 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
             return false;
         }
 
-        await _database.UpsertAsync(item, cancellationToken);
-        return true;
+        await _recordingGate.WaitAsync(cancellationToken);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!CanRecord(item)) return false;
+            await _database.UpsertAsync(item, cancellationToken);
+            return true;
+        }
+        finally { _recordingGate.Release(); }
     }
 
     private void OnWatcherError(object sender, ErrorEventArgs e)
@@ -332,6 +400,8 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         // 수동 새로고침이나 시작 스캔이 진행 중이었다면 DB를 닫기 전에 끝날 때까지 기다린다.
         await _scanGate.WaitAsync();
         _scanGate.Release();
+        await _recordingGate.WaitAsync();
+        _recordingGate.Release();
         _log?.Information("Recent Items monitoring stopped.");
         DiagnosticsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -370,7 +440,8 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
                 _watcherRecoveryCount,
                 _lastErrorUtc,
                 _lastErrorMessage,
-                _inFlightTasks.Count);
+                _inFlightTasks.Count,
+                IsRecordingPaused);
         }
     }
 
@@ -443,5 +514,6 @@ public sealed class RecentItemsMonitor : IDisposable, IAsyncDisposable
         _pendingCaptures.Clear();
         _lifetimeCancellation.Dispose();
         _scanGate.Dispose();
+        _recordingGate.Dispose();
     }
 }

@@ -24,6 +24,34 @@ public sealed class AppSettingsService
     public string Language => _settings.Language;
 
     public bool FolderGroupingEnabled => _settings.FolderGroupingEnabled;
+    public bool RecordingPaused => _settings.RecordingPaused;
+    public IReadOnlyList<string> ExcludedFolders => _settings.ExcludedFolders.ToArray();
+
+    public RecordingConfiguration GetRecordingConfiguration()
+    {
+        var settings = _settings;
+        return new RecordingConfiguration(settings.RecordingPaused, settings.ExcludedFolders.ToArray(),
+            settings.RecordingResumeAfterUtc);
+    }
+
+    public void SetRecordingPaused(bool paused)
+    {
+        var updatedSettings = _settings with
+        {
+            RecordingPaused = paused,
+            RecordingResumeAfterUtc = _settings.RecordingPaused && !paused
+                ? DateTimeOffset.UtcNow : _settings.RecordingResumeAfterUtc
+        };
+        Save(updatedSettings);
+        _settings = updatedSettings;
+    }
+
+    public void SetExcludedFolders(IEnumerable<string> folders)
+    {
+        var updatedSettings = _settings with { ExcludedFolders = ExcludedFolderPathRules.Normalize(folders) };
+        Save(updatedSettings);
+        _settings = updatedSettings;
+    }
 
     public void SetFolderGrouping(bool enabled)
     {
@@ -124,9 +152,11 @@ public sealed class AppSettingsService
             using var stream = new FileStream(_settingsPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             var settings = JsonSerializer.Deserialize<AppSettings>(stream)
                            ?? throw new InvalidDataException("설정 파일이 비어 있거나 유효하지 않습니다.");
-            return settings.SavedSearches is null
-                ? settings with { SavedSearches = [] }
-                : settings;
+            return settings with
+            {
+                SavedSearches = settings.SavedSearches ?? [],
+                ExcludedFolders = ExcludedFolderPathRules.Normalize(settings.ExcludedFolders ?? [])
+            };
         }
         catch (FileNotFoundException)
         {
@@ -154,5 +184,8 @@ public sealed class AppSettingsService
         public bool AutoBackupEnabled { get; init; }
         public int AutoBackupRetention { get; init; } = 7;
         public bool FolderGroupingEnabled { get; init; }
+        public bool RecordingPaused { get; init; }
+        public DateTimeOffset? RecordingResumeAfterUtc { get; init; }
+        public string[] ExcludedFolders { get; init; } = [];
     }
 }

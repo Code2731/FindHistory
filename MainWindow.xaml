@@ -31,12 +31,14 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="10" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="10" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
             <StackPanel VerticalAlignment="Center">
                 <TextBlock Text="FindHistory" FontSize="24" FontWeight="SemiBold" />
                 <TextBlock Text="{loc:Translate '최근에 열었던 파일을 로컬 기록에서 바로 찾으세요'}"
-                           Style="{StaticResource SecondaryText}" FontSize="13" Margin="0,4,0,0" />
+                           Style="{StaticResource SecondaryText}" FontSize="13" Margin="0,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
 
             <Border Grid.Column="1" Background="{StaticResource SurfaceBrush}"
@@ -57,6 +59,9 @@
                     </Ellipse>
                     <TextBlock Text="{Binding MonitorStatusText}" Style="{StaticResource SecondaryText}"
                                FontSize="12" VerticalAlignment="Center" />
+                    <Button Content="{Binding RecordingToggleText}" Command="{Binding ToggleRecordingCommand}"
+                            Style="{StaticResource QuietButton}" FontSize="11" Padding="8,4" MinHeight="26"
+                            Margin="10,0,0,0" />
                 </StackPanel>
             </Border>
 

@@ -698,6 +698,99 @@ try
             "감시기 종료 상태가 진단 정보에 반영되지 않았습니다.");
     }
 
+    var privacyRecent = Path.Combine(testRoot, "privacy-recent");
+    Directory.CreateDirectory(privacyRecent);
+    var privateFolder = Path.Combine(testRoot, "private");
+    var siblingFolder = privateFolder + "-other";
+    var recordingSettingsPath = Path.Combine(testRoot, "recording-settings.json");
+    var recordingSettings = new AppSettingsService(recordingSettingsPath);
+    recordingSettings.SetExcludedFolders([privateFolder + "\\", privateFolder.ToUpperInvariant()]);
+    Assert(recordingSettings.ExcludedFolders.Count == 1,
+        "제외 폴더의 대소문자·끝 구분자를 정규화하지 않았습니다.");
+    Assert(ExcludedFolderPathRules.IsExcluded(Path.Combine(privateFolder, "nested", "file.txt"),
+               recordingSettings.ExcludedFolders) &&
+           ExcludedFolderPathRules.IsExcluded(privateFolder, recordingSettings.ExcludedFolders) &&
+           !ExcludedFolderPathRules.IsExcluded(Path.Combine(siblingFolder, "file.txt"), recordingSettings.ExcludedFolders),
+        "제외 폴더의 하위 경로 또는 형제 폴더 경계 처리가 올바르지 않습니다.");
+    await File.WriteAllTextAsync(Path.Combine(privacyRecent, "excluded.url"),
+        "[InternetShortcut]\nURL=" + Path.Combine(privateFolder, "secret.txt") + "\n");
+    await File.WriteAllTextAsync(Path.Combine(privacyRecent, "allowed.url"),
+        "[InternetShortcut]\nURL=" + Path.Combine(siblingFolder, "allowed.txt") + "\n");
+    await using (var privacyDatabase = new RecentDatabase(Path.Combine(testRoot, "privacy.db")))
+    {
+        await privacyDatabase.InitializeAsync();
+        await using (var privacyMonitor = new RecentItemsMonitor(privacyDatabase, new ShortcutResolver(),
+                         privacyRecent, logger, recordingSettings))
+        {
+            await privacyMonitor.StartAsync();
+            Assert((await privacyDatabase.GetStatsAsync()).UniqueItems == 1,
+                "전체 스캔에 제외 폴더가 적용되지 않았습니다.");
+            var liveExcludedShortcut = Path.Combine(privacyRecent, "live-excluded.url");
+            await File.WriteAllTextAsync(liveExcludedShortcut,
+                "[InternetShortcut]\nURL=" + Path.Combine(privateFolder, "nested", "live-secret.txt") + "\n");
+            await privacyMonitor.ScanAsync();
+            Assert((await privacyDatabase.SearchAsync("live-secret", null)).Count == 0,
+                "실시간·전체 스캔에 하위 폴더 제외가 적용되지 않았습니다.");
+
+            recordingSettings.SetRecordingPaused(true);
+            await privacyMonitor.RefreshConfigurationAsync();
+            Assert(privacyMonitor.IsRecordingPaused && privacyMonitor.GetDiagnosticsSnapshot().IsRecordingPaused &&
+                   !privacyMonitor.GetDiagnosticsSnapshot().IsWatcherActive,
+                "기록 일시정지가 감시기와 진단에 반영되지 않았습니다.");
+            var pausedShortcut = Path.Combine(privacyRecent, "paused.url");
+            await File.WriteAllTextAsync(pausedShortcut,
+                "[InternetShortcut]\nURL=" + Path.Combine(siblingFolder, "paused.txt") + "\n");
+            Assert(await privacyMonitor.ScanAsync() == 0 &&
+                   (await privacyDatabase.SearchAsync("paused.txt", null)).Count == 0,
+                "일시정지 중 전체 스캔이 새 기록을 저장했습니다.");
+            await privacyMonitor.StopAsync();
+        }
+        var restartedRecordingSettings = new AppSettingsService(recordingSettingsPath);
+        Assert(restartedRecordingSettings.RecordingPaused && restartedRecordingSettings.ExcludedFolders.Count == 1,
+            "일시정지·제외 폴더 설정이 재시작 후 유지되지 않았습니다.");
+        await using (var resumedMonitor = new RecentItemsMonitor(privacyDatabase, new ShortcutResolver(),
+                         privacyRecent, logger, restartedRecordingSettings))
+        {
+            await resumedMonitor.StartAsync();
+            Assert(resumedMonitor.IsRecordingPaused && (await privacyDatabase.GetStatsAsync()).UniqueItems == 1,
+                "일시정지 상태로 시작한 앱이 기존 바로가기를 수집했습니다.");
+            restartedRecordingSettings.SetRecordingPaused(false);
+            await resumedMonitor.RefreshConfigurationAsync();
+            await resumedMonitor.ScanAsync();
+            Assert((await privacyDatabase.SearchAsync("paused.txt", null)).Count == 0,
+                "기록 재개가 일시정지 중 생성된 기록을 가져왔습니다.");
+            var cutoff = restartedRecordingSettings.GetRecordingConfiguration().ResumeAfterUtc!.Value;
+            var newShortcut = Path.Combine(privacyRecent, "after-resume.url");
+            await File.WriteAllTextAsync(newShortcut,
+                "[InternetShortcut]\nURL=" + Path.Combine(siblingFolder, "after-resume.txt") + "\n");
+            File.SetLastWriteTimeUtc(newShortcut, cutoff.UtcDateTime.AddSeconds(1));
+            await WaitUntilAsync(async () => (await privacyDatabase.SearchAsync("after-resume.txt", null)).Count == 1,
+                TimeSpan.FromSeconds(5));
+            Assert((await privacyDatabase.SearchAsync("allowed.txt", null)).Single().OpenCount == 1,
+                "기록 재개가 기존 기록의 열기 횟수를 변경했습니다.");
+            var newExcludedShortcut = Path.Combine(privacyRecent, "new-excluded.url");
+            await File.WriteAllTextAsync(newExcludedShortcut,
+                "[InternetShortcut]\nURL=" + Path.Combine(privateFolder, "new-excluded.txt") + "\n");
+            File.SetLastWriteTimeUtc(newExcludedShortcut, cutoff.UtcDateTime.AddSeconds(2));
+            await resumedMonitor.ScanAsync();
+            Assert((await privacyDatabase.SearchAsync("new-excluded.txt", null)).Count == 0,
+                "기록 재개 후 제외 폴더의 항목을 저장했습니다.");
+            restartedRecordingSettings.SetExcludedFolders([]);
+            await resumedMonitor.RefreshConfigurationAsync();
+            await resumedMonitor.ScanAsync();
+            Assert((await privacyDatabase.SearchAsync("new-excluded.txt", null)).Count == 1,
+                "제외 해제 후 수집이 복구되지 않았습니다.");
+            await resumedMonitor.StopAsync();
+        }
+        await using (var afterResumeRestart = new RecentItemsMonitor(privacyDatabase, new ShortcutResolver(),
+                         privacyRecent, logger, new AppSettingsService(recordingSettingsPath)))
+        {
+            await afterResumeRestart.StartAsync();
+            Assert((await privacyDatabase.SearchAsync("paused.txt", null)).Count == 0,
+                "재시작 스캔이 과거 일시정지 기록을 가져왔습니다.");
+        }
+    }
+
     var settingsPath = Path.Combine(testRoot, "settings.json");
     var settings = new AppSettingsService(settingsPath);
     Assert(settings.Language == "ko", "새 설정의 기본 언어가 한국어가 아닙니다.");
@@ -786,6 +879,14 @@ try
         () => Task.Run(() => blockedSettings.SetLanguage("en")),
         "언어 설정 저장 실패를 감지하지 못했습니다.");
     Assert(blockedSettings.Language == "ko", "언어 설정 저장 실패 뒤 메모리 값이 먼저 바뀌었습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetRecordingPaused(true)),
+        "일시정지 설정 저장 실패를 감지하지 못했습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetExcludedFolders([privateFolder])),
+        "제외 폴더 설정 저장 실패를 감지하지 못했습니다.");
+    Assert(!blockedSettings.RecordingPaused && blockedSettings.ExcludedFolders.Count == 0,
+        "일시정지·제외 폴더 저장 실패 뒤 메모리 값이 변경되었습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => recordingSettings.SetExcludedFolders(["relative"])),
+        "상대 경로 제외 폴더를 거부하지 않았습니다.");
     await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetFolderGrouping(true)),
         "폴더 그룹화 설정 저장 실패를 감지하지 못했습니다.");
     Assert(!blockedSettings.FolderGroupingEnabled,

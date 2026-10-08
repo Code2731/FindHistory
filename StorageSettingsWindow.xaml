@@ -7,7 +7,7 @@
         ResizeMode="NoResize" ShowInTaskbar="False"
         WindowStartupLocation="CenterOwner"
         Background="{StaticResource PageBrush}">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer x:Name="SettingsScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <Grid Margin="26,22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -210,7 +210,44 @@
             </StackPanel>
         </Border>
 
-        <Grid Grid.Row="16">
+        <StackPanel Grid.Row="16">
+        <Border Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                CornerRadius="10" Padding="16,13" Margin="0,0,0,18">
+            <StackPanel>
+                <TextBlock Text="{loc:Translate '기록 수집 설정'}" FontSize="14" FontWeight="SemiBold" />
+                <Button Content="{Binding RecordingToggleText}" Command="{Binding ToggleRecordingCommand}"
+                        HorizontalAlignment="Left" Margin="0,8,0,0" />
+                <TextBlock Text="{loc:Translate '일시정지는 재시작 후에도 유지됩니다. 다시 시작하면 그 이후에 열린 항목부터 수집합니다.'}"
+                           Style="{StaticResource SecondaryText}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <TextBlock Text="{loc:Translate '제외 폴더'}" FontWeight="SemiBold" Margin="0,12,0,0" />
+                <TextBlock Text="{loc:Translate '지정한 폴더와 하위 폴더의 새 기록을 제외합니다. 이미 저장된 기록은 계속 조회할 수 있습니다.'}"
+                           Style="{StaticResource SecondaryText}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0" />
+                <ListBox x:Name="ExcludedFolderList" ItemsSource="{Binding ExcludedFolders}" MaxHeight="130"
+                         MinHeight="52" Margin="0,8,0,0" Background="{StaticResource PageBrush}"
+                         Foreground="{StaticResource TextBrush}" BorderBrush="{StaticResource BorderBrush}"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                            <Setter Property="Padding" Value="6,4" />
+                            <Style.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="{StaticResource AccentContainerBrush}" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                </ListBox>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Content="{loc:Translate '제외 폴더 추가'}" Click="OnAddExcludedFolderClick" />
+                    <Button Content="{loc:Translate '선택 해제'}" Click="OnRemoveExcludedFolderClick"
+                            Style="{StaticResource QuietButton}" Margin="12,0,0,0" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+        <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -219,6 +256,7 @@
                       IsChecked="{Binding AutoStartEnabled, Mode=TwoWay}" />
             <Button Grid.Column="1" Content="{loc:Translate '닫기'}" Click="OnCloseClick" MinWidth="82" />
         </Grid>
+        </StackPanel>
     </Grid>
     </ScrollViewer>
 </Window>

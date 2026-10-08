@@ -265,6 +265,36 @@ public partial class StorageSettingsWindow : Window
 
     private void OnOpenFolderClick(object sender, RoutedEventArgs e) => _viewModel.OpenDatabaseFolder();
 
+    private async void OnAddExcludedFolderClick(object sender, RoutedEventArgs e)
+    {
+        using var dialog = new Forms.FolderBrowserDialog
+        {
+            Description = T("기록에서 제외할 폴더를 선택하세요."), UseDescriptionForTitle = true
+        };
+        if (dialog.ShowDialog() != Forms.DialogResult.OK) return;
+        IsEnabled = false;
+        try
+        {
+            if (!await _viewModel.AddExcludedFolderAsync(dialog.SelectedPath))
+                System.Windows.MessageBox.Show(this, _viewModel.StatusText, T("제외 폴더"),
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { IsEnabled = true; }
+    }
+
+    private async void OnRemoveExcludedFolderClick(object sender, RoutedEventArgs e)
+    {
+        if (ExcludedFolderList.SelectedItem is not string path) return;
+        IsEnabled = false;
+        try
+        {
+            if (!await _viewModel.RemoveExcludedFolderAsync(path))
+                System.Windows.MessageBox.Show(this, _viewModel.StatusText, T("제외 폴더"),
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally { IsEnabled = true; }
+    }
+
     private async void OnRefreshStorageClick(object sender, RoutedEventArgs e)
     {
         IsEnabled = false;
@@ -309,4 +339,11 @@ public partial class StorageSettingsWindow : Window
     private static string T(string text) => LocalizationManager.Instance.Translate(text);
 
     private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
+
+    internal void PrepareBottomScreenshot()
+    {
+        UpdateLayout();
+        SettingsScrollViewer.ScrollToBottom();
+        UpdateLayout();
+    }
 }

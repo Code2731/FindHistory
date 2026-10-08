@@ -334,6 +334,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _autoStartEnabled = TryGetAutoStart(autoStart);
 
         RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
+        ToggleRecordingCommand = new AsyncCommand(ToggleRecordingAsync, () => !IsBusy);
         OpenCommand = new RelayCommand(OpenSelected, () => SelectedItem is not null);
         RevealCommand = new RelayCommand(RevealSelected, () => SelectedItem is not null);
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty, () => SearchText.Length > 0);
@@ -382,6 +383,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(MonitorStatusText));
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(SelectedLanguage));
+        OnPropertyChanged(nameof(RecordingToggleText));
         OnPropertyChanged(nameof(StorageStatisticsText));
         if (_initialized)
         {
@@ -393,6 +395,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public AsyncCommand RefreshCommand { get; }
+    public AsyncCommand ToggleRecordingCommand { get; }
     public RelayCommand OpenCommand { get; }
     public RelayCommand RevealCommand { get; }
     public RelayCommand ClearSearchCommand { get; }
@@ -495,6 +498,68 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     public string DatabasePath => _database.DatabasePath;
 
     public string DatabaseDirectory => Path.GetDirectoryName(DatabasePath) ?? DatabasePath;
+
+    public bool IsRecordingPaused => _monitor.IsRecordingPaused;
+    public string RecordingToggleText => LocalizationManager.Instance.Translate(
+        IsRecordingPaused ? "기록 다시 시작" : "기록 일시정지");
+    public IReadOnlyList<string> ExcludedFolders => _settings.ExcludedFolders;
+
+    private async Task ToggleRecordingAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            _settings.SetRecordingPaused(!IsRecordingPaused);
+            await _monitor.RefreshConfigurationAsync();
+            StatusText = LocalizationManager.Instance.Translate(IsRecordingPaused
+                ? "기록을 일시정지했습니다. 재시작 후에도 유지됩니다."
+                : "기록을 다시 시작했습니다. 지금부터 열린 항목을 수집합니다.");
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Changing recording pause failed.", ex);
+            StatusText = LocalizationManager.Instance.Format(
+                "기록 설정 변경 실패: {0}", "Changing recording settings failed: {0}", ex.Message);
+        }
+        finally
+        {
+            UpdateMonitorStatus();
+            OnPropertyChanged(nameof(IsRecordingPaused));
+            OnPropertyChanged(nameof(RecordingToggleText));
+            IsBusy = false;
+        }
+    }
+
+    public Task<bool> AddExcludedFolderAsync(string path) =>
+        SaveExcludedFoldersAsync(_settings.ExcludedFolders.Append(path));
+
+    public Task<bool> RemoveExcludedFolderAsync(string path) =>
+        SaveExcludedFoldersAsync(_settings.ExcludedFolders.Where(folder =>
+            !string.Equals(folder, path, StringComparison.OrdinalIgnoreCase)));
+
+    private async Task<bool> SaveExcludedFoldersAsync(IEnumerable<string> folders)
+    {
+        IsBusy = true;
+        try
+        {
+            _settings.SetExcludedFolders(folders);
+            await _monitor.RefreshConfigurationAsync();
+            StatusText = LocalizationManager.Instance.Translate("제외 폴더 설정을 저장했습니다.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Saving excluded folders failed.", ex);
+            StatusText = LocalizationManager.Instance.Format(
+                "제외 폴더 설정 저장 실패: {0}", "Saving excluded folders failed: {0}", ex.Message);
+            return false;
+        }
+        finally
+        {
+            OnPropertyChanged(nameof(ExcludedFolders));
+            IsBusy = false;
+        }
+    }
 
     public string StorageStatisticsText
     {
@@ -647,6 +712,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (SetField(ref _isBusy, value))
             {
                 RefreshCommand.RaiseCanExecuteChanged();
+                ToggleRecordingCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -669,7 +735,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             UpdateMonitorStatus();
             await LoadAsync(CancellationToken.None);
             await LoadActivityAsync(CancellationToken.None);
-            StatusText = "최근 항목 폴더를 실시간으로 감시하고 있습니다.";
+            StatusText = IsRecordingPaused
+                ? "기록을 일시정지했습니다. 재시작 후에도 유지됩니다."
+                : "최근 항목 폴더를 실시간으로 감시하고 있습니다.";
         }
         finally
         {
@@ -1004,7 +1072,9 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             var captured = await _monitor.ScanAsync(notifyChanges: false);
             await LoadAsync(CancellationToken.None);
             await LoadActivityAsync(CancellationToken.None);
-            StatusText = $"최근 항목 {captured:N0}개를 확인했습니다.";
+            StatusText = IsRecordingPaused
+                ? "기록을 일시정지했습니다. 저장된 기록을 표시합니다."
+                : $"최근 항목 {captured:N0}개를 확인했습니다.";
         }
         catch (Exception ex)
         {
@@ -1308,10 +1378,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         var diagnostics = _monitor.GetDiagnosticsSnapshot();
         IsMonitorHealthy = diagnostics.IsStarted &&
                            !diagnostics.IsStopping &&
+                           !IsRecordingPaused &&
                            diagnostics.IsWatcherActive;
         MonitorStatusText = diagnostics.IsStopping
             ? "기록 종료 중"
-            : IsMonitorHealthy
+            : IsRecordingPaused
+                ? "기록 일시정지 중"
+                : IsMonitorHealthy
                 ? "백그라운드 기록 중"
                 : diagnostics.IsStarted
                     ? "감시 복구 필요"
@@ -1376,6 +1449,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             return LocalizationManager.Instance.Translate("시작 전");
         }
+        if (monitor.IsRecordingPaused)
+            return LocalizationManager.Instance.Translate("기록 일시정지 중");
         return LocalizationManager.Instance.Translate(monitor.IsWatcherActive ? "정상 감시 중" : "감시기 비활성");
     }
 

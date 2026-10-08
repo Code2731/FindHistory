@@ -14,7 +14,8 @@ public sealed record MonitorDiagnostics(
     int WatcherRecoveryCount,
     DateTimeOffset? LastErrorUtc,
     string? LastErrorMessage,
-    int PendingTaskCount);
+    int PendingTaskCount,
+    bool IsRecordingPaused = false);
 
 public sealed record DatabaseDiagnostics(
     long UniqueItems,
