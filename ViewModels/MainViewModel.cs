@@ -1286,8 +1286,26 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        SpecificDate = day.Date;
-        SelectedDateRange = DateRanges.First(option => option.IsSpecificDate);
+        var date = day.Date.Date;
+        var range = DateRanges.First(option => option.IsSpecificDate);
+        var dateChanged = _specificDate != date;
+        var rangeChanged = _selectedDateRange != range;
+        if (dateChanged || rangeChanged)
+        {
+            // Publish a complete date selection. Binding observers must not see an intermediate range.
+            _specificDate = date;
+            _selectedDateRange = range;
+            if (dateChanged) OnPropertyChanged(nameof(SpecificDate));
+            if (rangeChanged)
+            {
+                OnPropertyChanged(nameof(SelectedDateRange));
+                OnPropertyChanged(nameof(IsSpecificDateSelected));
+            }
+            ClearSavedSearchSelection();
+            OnPropertyChanged(nameof(FilterChips));
+            UpdateActivitySelection();
+            ScheduleReload();
+        }
         StatusText = $"{day.Date:yyyy-MM-dd}에 열었던 파일을 표시합니다.";
     }
 
