@@ -202,7 +202,13 @@ dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --contentio
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --export-contention-only
 ```
 
-현재 최적화된 기준 구현은 10만 건 DB에서 최신 1,000건 조회 약 **4.21 ms**, `*.pdf` 1,000건 조회 약 **6.10 ms**, 최근 7일 이벤트 1,000건 조회 약 **13.42 ms**를 기록했습니다. 수치는 개발 환경에 따라 달라지며, 측정 방법과 100만 건 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 정리되어 있습니다.
+2026-10-09 .NET 10 측정에서 합성 10만 건 DB의 최신 1,000건 조회 중앙값은 **6.89 ms**, `*.pdf` 조회는 **9.43 ms**, 최근 7일 이벤트 기준 검색은 **15.90 ms**였습니다. 히트맵 112일 집계는 **59.55 ms**, 진단 조회는 **2.05 ms**였습니다. 실행 간 편차가 있으며 UI 렌더링 시간은 포함하지 않습니다. 현재 측정 방법과 이전 100만 건 결과는 [성능 보고서](docs/PERFORMANCE_2026-09-24.md)에 구분해서 기록했습니다.
+
+사용자 기록을 읽지 않고 검색·집계·진단만 측정하려면:
+
+```powershell
+dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --search-only 100000
+```
 
 다음 개발 단계와 완료 조건은 [개발 로드맵](docs/ROADMAP.md)에서 확인할 수 있습니다.
 
@@ -397,7 +403,13 @@ Measure search latency during a 100,000-item JSON export with:
 dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --export-contention-only
 ```
 
-On the current development setup, the optimized implementation measured approximately **4.21 ms** for the newest 1,000 rows in a 100,000-row database, **6.10 ms** for 1,000 `*.pdf` results, and **13.42 ms** for 1,000 events from the last seven days. Results vary by machine. See the [performance report](docs/PERFORMANCE_2026-09-24.md) for the methodology and 1-million-row results.
+The October 9, 2026 .NET 10 run used 100,000 synthetic items. Median times were **6.89 ms** for the newest 1,000 rows, **9.43 ms** for `*.pdf`, and **15.90 ms** for an event-based search over the last seven days. The 112-day heatmap aggregate took **59.55 ms**. Diagnostics took **2.05 ms**. Results vary between runs and exclude UI rendering. The [performance report](docs/PERFORMANCE_2026-09-24.md) separates current measurements from older 1-million-row results.
+
+To measure search, aggregation, and diagnostics without reading user history:
+
+```powershell
+dotnet run --project benchmarks\FindHistory.Benchmarks -c Release -- --search-only 100000
+```
 
 See the [development roadmap](docs/ROADMAP.md) for the next milestones and their completion gates.
 

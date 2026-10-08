@@ -4,8 +4,15 @@ using FindHistory.Services;
 using Microsoft.Data.Sqlite;
 
 var recentOnly = args.Any(arg => arg.Equals("--recent-only", StringComparison.OrdinalIgnoreCase));
+var searchOnly = args.Any(arg => arg.Equals("--search-only", StringComparison.OrdinalIgnoreCase));
 var contentionOnly = args.Any(arg => arg.Equals("--contention-only", StringComparison.OrdinalIgnoreCase));
 var exportContentionOnly = args.Any(arg => arg.Equals("--export-contention-only", StringComparison.OrdinalIgnoreCase));
+if (new[] { recentOnly, searchOnly, contentionOnly, exportContentionOnly }.Count(enabled => enabled) > 1)
+{
+    Console.Error.WriteLine("Choose only one benchmark mode.");
+    Environment.ExitCode = 2;
+    return;
+}
 var countArguments = args.Where(arg => !arg.StartsWith("--", StringComparison.Ordinal)).ToArray();
 var counts = recentOnly || contentionOnly || exportContentionOnly
     ? []
@@ -17,6 +24,7 @@ Directory.CreateDirectory(benchmarkRoot);
 
 Console.WriteLine($"FindHistory baseline benchmark | .NET {Environment.Version} | {Environment.OSVersion}");
 Console.WriteLine("Seed time is reported separately and does not use the production collector path.");
+if (searchOnly) Console.WriteLine("Synthetic datasets only. Windows Recent Items and user history are not read.");
 Console.WriteLine();
 
 try
@@ -31,8 +39,11 @@ try
     }
     else
     {
-        await MeasureRecentFolderAsync(benchmarkRoot);
-        await MeasureCollectorThroughputAsync(benchmarkRoot);
+        if (!searchOnly)
+        {
+            await MeasureRecentFolderAsync(benchmarkRoot);
+            await MeasureCollectorThroughputAsync(benchmarkRoot);
+        }
 
         foreach (var count in counts)
         {
@@ -103,7 +114,7 @@ static async Task MeasureDatabaseContentionAsync(string root)
     Array.Sort(writeTimes);
     Console.WriteLine($"  write batch median | {writeTimes[iterations / 2]:N1} ms");
     Console.WriteLine($"  queued search median | {results[iterations / 2]:N1} ms");
-    Console.WriteLine($"  queued search p95    | {results[^1]:N1} ms");
+    Console.WriteLine($"  queued search max    | {results[^1]:N1} ms");
     Console.WriteLine("  Search is intentionally queued behind the batch in the current single-gate design.");
 
     foreach (var cacheMode in new[] { SqliteCacheMode.Shared, SqliteCacheMode.Private })
@@ -279,7 +290,7 @@ static async Task MeasureCollectorThroughputAsync(string root)
 static async Task RunSearchScaleAsync(string root, int count)
 {
     var path = Path.Combine(root, count.ToString(), "findhistory.db");
-    var database = new RecentDatabase(path);
+    await using var database = new RecentDatabase(path);
     await database.InitializeAsync();
 
     var seedTime = await SeedAsync(path, count);
@@ -289,7 +300,7 @@ static async Task RunSearchScaleAsync(string root, int count)
     Console.WriteLine($"DATASET {count:N0} | seed {seedTime.TotalSeconds:N2} s | DB {FormatBytes(sizeBytes)}");
     await PrintMeasurementAsync("latest 1000", () => database.SearchAsync(string.Empty, null));
     await PrintMeasurementAsync("unique filename", () => database.SearchAsync(targetToken, null));
-    await PrintMeasurementAsync("path + extension", () => database.SearchAsync("Project042 PDF", null));
+    await PrintMeasurementAsync("path + extension", () => database.SearchAsync("Project041 PDF", null));
     await PrintMeasurementAsync("extension glob", () => database.SearchAsync("*.pdf", null));
     await PrintMeasurementAsync("common token", () => database.SearchAsync("report", null));
     await PrintMeasurementAsync("missing token", () => database.SearchAsync("definitely_not_present_xyz", null));
@@ -298,7 +309,33 @@ static async Task RunSearchScaleAsync(string root, int count)
     var eventRange = new HistoryDateRange(
         DateTimeOffset.UtcNow.AddDays(-7), DateTimeOffset.UtcNow.AddDays(1), "최근 7일");
     await PrintSnapshotMeasurementAsync("event date 7d", () => database.SearchWithStatsAsync(string.Empty, eventRange));
+    var today = DateTime.Today;
+    var activityRange = HistoryDateRangeFactory.CreateLocalCalendarRange(today.AddDays(-111), today.AddDays(1), "112 days");
+    await PrintAggregateMeasurementAsync("activity 112d", async () =>
+        (await database.GetDailyActivityAsync(activityRange)).Count, "days");
+    await PrintAggregateMeasurementAsync("diagnostics", async () =>
+        (await database.GetDiagnosticsAsync()).StoredEvents, "events");
     Console.WriteLine();
+}
+
+static async Task PrintAggregateMeasurementAsync(string name, Func<Task<long>> action, string unit)
+{
+    await action();
+    const int iterations = 7;
+    var timings = new double[iterations];
+    var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
+    long result = 0;
+    for (var index = 0; index < iterations; index++)
+    {
+        var timer = Stopwatch.StartNew();
+        result = await action();
+        timer.Stop();
+        timings[index] = timer.Elapsed.TotalMilliseconds;
+    }
+    var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
+    Array.Sort(timings);
+    Console.WriteLine($"  {name,-18} | median {timings[iterations / 2],8:N2} ms | " +
+                      $"max {timings[^1],8:N2} ms | {result:N0} {unit} | alloc {FormatBytes(allocated / iterations)}/op");
 }
 
 static async Task<TimeSpan> SeedAsync(string databasePath, int count)
@@ -391,7 +428,7 @@ static async Task PrintMeasurementAsync(string name, Func<Task<IReadOnlyList<Rec
     var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
     Array.Sort(timings);
     Console.WriteLine($"  {name,-18} | median {timings[iterations / 2],8:N2} ms | " +
-                      $"p95 {timings[^1],8:N2} ms | {resultCount,4:N0} rows | " +
+                      $"max {timings[^1],8:N2} ms | {resultCount,4:N0} rows | " +
                       $"alloc {FormatBytes(allocated / iterations)}/op");
 }
 
@@ -413,7 +450,7 @@ static async Task PrintSnapshotMeasurementAsync(string name, Func<Task<SearchSna
     var allocated = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore;
     Array.Sort(timings);
     Console.WriteLine($"  {name,-18} | median {timings[iterations / 2],8:N2} ms | " +
-                      $"p95 {timings[^1],8:N2} ms | {resultCount,4:N0} rows | " +
+                      $"max {timings[^1],8:N2} ms | {resultCount,4:N0} rows | " +
                       $"alloc {FormatBytes(allocated / iterations)}/op");
 }
 
@@ -448,8 +485,8 @@ static int ParseCount(string text)
 
 static string FormatBytes(long bytes) => bytes switch
 {
-    >= 1024L * 1024 * 1024 => $"{bytes / 1024d / 1024 / 1024:N2} GB",
-    >= 1024L * 1024 => $"{bytes / 1024d / 1024:N1} MB",
-    >= 1024L => $"{bytes / 1024d:N1} KB",
+    >= 1024L * 1024 * 1024 => $"{bytes / 1024d / 1024 / 1024:N2} GiB",
+    >= 1024L * 1024 => $"{bytes / 1024d / 1024:N1} MiB",
+    >= 1024L => $"{bytes / 1024d:N1} KiB",
     _ => $"{bytes} B"
 };
