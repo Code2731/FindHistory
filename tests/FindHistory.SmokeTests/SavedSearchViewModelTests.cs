@@ -33,6 +33,13 @@ internal static class SavedSearchViewModelTests
         await using var monitor = new RecentItemsMonitor(database, new ShortcutResolver(), recent, log, restored);
         using var vm = new MainViewModel(database, monitor, new AutoStartService(), restored, log);
         await vm.InitializeAsync();
+        var expectedVersion = typeof(MainViewModel).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .Cast<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion;
+        Check(vm.AppBuildVersion == expectedVersion && vm.AppVersionText == "v" + expectedVersion.Split('+', 2)[0],
+            "메인 화면 버전 표시가 앱 빌드 정보와 일치하지 않습니다.");
+        Check((await vm.BuildDiagnosticsReportAsync()).Contains(vm.AppBuildVersion, StringComparison.Ordinal),
+            "진단 보고서가 메인 화면과 다른 앱 버전을 사용합니다.");
         var notifications = new List<string?>();
         Func<bool>? consistent = null;
         var intermediateState = false;

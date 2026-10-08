@@ -77,6 +77,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public record LanguageOption(string Code, string Label);
 
+    public string AppBuildVersion { get; } = typeof(MainViewModel).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(MainViewModel).Assembly.GetName().Version?.ToString(3)
+        ?? "?";
+
+    public string AppVersionText => "v" + AppBuildVersion.Split('+', 2)[0];
+
     public IReadOnlyList<ExistenceOption> ExistenceOptions
     {
         get => _existenceOptions;
@@ -1099,18 +1106,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         var monitor = _monitor.GetDiagnosticsSnapshot();
         var database = await _database.GetDiagnosticsAsync(cancellationToken);
-        var assembly = Assembly.GetEntryAssembly() ?? typeof(MainViewModel).Assembly;
-        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
-                          ?.InformationalVersion
-                      ?? assembly.GetName().Version?.ToString()
-                      ?? "알 수 없음";
         var databaseBytes = TryGetFileSize(DatabasePath);
         var isEnglish = LocalizationManager.Instance.Language == "en";
         string Label(string korean) => LocalizationManager.Instance.Translate(korean);
         var builder = new StringBuilder();
         builder.AppendLine(isEnglish ? "FindHistory Diagnostics" : "FindHistory 진단 정보")
             .AppendLine($"{Label("생성 시각")}: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}")
-            .AppendLine($"{Label("앱 버전")}: {version}")
+            .AppendLine($"{Label("앱 버전")}: {AppBuildVersion}")
             .AppendLine($"{Label("운영체제")}: {RuntimeInformation.OSDescription}")
             .AppendLine($"{Label("프로세스")}: {RuntimeInformation.ProcessArchitecture} / .NET {Environment.Version}")
             .AppendLine()

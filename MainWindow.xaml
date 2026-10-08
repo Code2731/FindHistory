@@ -36,7 +36,15 @@
             </Grid.ColumnDefinitions>
 
             <StackPanel VerticalAlignment="Center">
-                <TextBlock Text="FindHistory" FontSize="24" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="FindHistory" FontSize="24" FontWeight="SemiBold" />
+                    <Border Background="{StaticResource SurfaceBrush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="7,3" Margin="10,0,0,0"
+                            VerticalAlignment="Center" ToolTip="{Binding AppBuildVersion}">
+                        <TextBlock Text="{Binding AppVersionText}" Style="{StaticResource SecondaryText}"
+                                   FontSize="11" AutomationProperties.Name="{loc:Translate '앱 버전'}" />
+                    </Border>
+                </StackPanel>
                 <TextBlock Text="{loc:Translate '최근에 열었던 파일을 로컬 기록에서 바로 찾으세요'}"
                            Style="{StaticResource SecondaryText}" FontSize="13" Margin="0,4,0,0" TextWrapping="Wrap" />
             </StackPanel>
