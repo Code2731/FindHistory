@@ -184,6 +184,8 @@ public partial class App : System.Windows.Application
 
     private void RegisterUnhandledExceptionLogging()
     {
+        // Command failures are handled at their boundary. Other unhandled UI failures remain fatal:
+        // continuing with unknown database or UI state could damage history. Log before shutdown.
         DispatcherUnhandledException += (_, args) =>
             _log.Error("Unhandled UI exception.", args.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>

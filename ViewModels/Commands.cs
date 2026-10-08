@@ -28,29 +28,42 @@ public sealed class RelayCommand<T>(Action<T> execute, Predicate<T>? canExecute 
     public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
 }
 
-public sealed class AsyncCommand(Func<Task> execute, Func<bool>? canExecute = null) : ICommand
+public sealed class AsyncCommand(
+    Func<Task> execute, Action<Exception> onError, Func<bool>? canExecute = null) : ICommand
 {
-    private bool _isRunning;
+    private int _isRunning;
     public event EventHandler? CanExecuteChanged;
 
-    public bool CanExecute(object? parameter) => !_isRunning && (canExecute?.Invoke() ?? true);
+    public bool CanExecute(object? parameter) => Volatile.Read(ref _isRunning) == 0 && (canExecute?.Invoke() ?? true);
 
     public async void Execute(object? parameter)
     {
-        if (!CanExecute(parameter))
-        {
-            return;
-        }
-
-        _isRunning = true;
-        CanExecuteChanged?.Invoke(this, EventArgs.Empty);
         try
         {
+            await ExecuteAsync(parameter);
+        }
+        catch (OperationCanceledException ex) when (ex.CancellationToken.IsCancellationRequested)
+        {
+            // Only an explicitly cancelled operation is an expected cancellation.
+        }
+        catch (Exception ex)
+        {
+            onError(ex);
+        }
+    }
+
+    // Task callers observe failures directly. The ICommand bridge reports UI failures through onError.
+    public async Task ExecuteAsync(object? parameter = null)
+    {
+        if (!CanExecute(parameter) || Interlocked.CompareExchange(ref _isRunning, 1, 0) != 0) return;
+        try
+        {
+            CanExecuteChanged?.Invoke(this, EventArgs.Empty);
             await execute();
         }
         finally
         {
-            _isRunning = false;
+            Volatile.Write(ref _isRunning, 0);
             CanExecuteChanged?.Invoke(this, EventArgs.Empty);
         }
     }

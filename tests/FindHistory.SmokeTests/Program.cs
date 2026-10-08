@@ -1,6 +1,7 @@
 using FindHistory.Models;
 using FindHistory.Services;
 using FindHistory.Localization;
+using FindHistory.ViewModels;
 using System.Text.Json;
 
 var testRoot = Path.Combine(Path.GetTempPath(), $"FindHistory-Smoke-{Guid.NewGuid():N}");
@@ -8,6 +9,65 @@ Directory.CreateDirectory(testRoot);
 
 try
 {
+    var commandRuns = 0;
+    var commandErrors = new List<Exception>();
+    var commandCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var commandChanges = 0;
+    var asyncCommand = new AsyncCommand(async () =>
+    {
+        commandRuns++;
+        await commandCompletion.Task;
+    }, commandErrors.Add);
+    asyncCommand.CanExecuteChanged += (_, _) => commandChanges++;
+    var runningCommand = asyncCommand.ExecuteAsync();
+    Assert(!asyncCommand.CanExecute(null), "실행 중인 명령을 다시 실행할 수 있습니다.");
+    await asyncCommand.ExecuteAsync();
+    asyncCommand.Execute(null);
+    Assert(commandRuns == 1, "실행 중 중복 명령을 차단하지 않았습니다.");
+    commandCompletion.SetResult();
+    await runningCommand;
+    Assert(asyncCommand.CanExecute(null) && commandChanges == 2 && commandErrors.Count == 0,
+        "명령 성공 후 실행 상태와 알림이 복구되지 않았습니다.");
+    await asyncCommand.ExecuteAsync();
+    Assert(commandRuns == 2, "완료된 명령을 다시 실행하지 못했습니다.");
+
+    var failure = new InvalidOperationException("command failure");
+    var failingCommand = new AsyncCommand(() => throw failure, commandErrors.Add);
+    failingCommand.Execute(null);
+    Assert(commandErrors.Count == 1 && ReferenceEquals(commandErrors[0], failure) && failingCommand.CanExecute(null),
+        "UI 명령 예외가 오류 처리에 전달되지 않았거나 실행 상태가 복구되지 않았습니다.");
+    await AssertThrowsAsync(() => failingCommand.ExecuteAsync(),
+        "Task 기반 명령 호출이 예외를 호출자에게 전달하지 않았습니다.");
+    Assert(commandErrors.Count == 1 && failingCommand.CanExecute(null),
+        "Task 기반 명령 실패가 중복 보고되거나 실행 상태를 유지했습니다.");
+
+    var delayedCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var errorReported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var delayedCommand = new AsyncCommand(() => delayedCompletion.Task, ex => errorReported.SetResult(ex));
+    delayedCommand.Execute(null);
+    delayedCompletion.SetException(failure);
+    Assert(ReferenceEquals(await errorReported.Task.WaitAsync(TimeSpan.FromSeconds(5)), failure) &&
+           delayedCommand.CanExecute(null), "비동기 UI 명령 실패가 보고되지 않았습니다.");
+
+    using (var commandCancellation = new CancellationTokenSource())
+    {
+        commandCancellation.Cancel();
+        var cancelledCommand = new AsyncCommand(() => Task.FromCanceled(commandCancellation.Token), commandErrors.Add);
+        cancelledCommand.Execute(null);
+        Assert(commandErrors.Count == 1 && cancelledCommand.CanExecute(null),
+            "요청된 명령 취소를 오류로 보고하거나 실행 상태를 유지했습니다.");
+    }
+    var unexpectedCancellation = new OperationCanceledException("not requested");
+    new AsyncCommand(() => throw unexpectedCancellation, commandErrors.Add).Execute(null);
+    Assert(commandErrors.Count == 2 && ReferenceEquals(commandErrors[1], unexpectedCancellation),
+        "취소 요청이 없는 예외를 조용히 무시했습니다.");
+    var disabledRuns = 0;
+    var disabledCommand = new AsyncCommand(() => { disabledRuns++; return Task.CompletedTask; },
+        commandErrors.Add, () => false);
+    await disabledCommand.ExecuteAsync();
+    disabledCommand.Execute(null);
+    Assert(disabledRuns == 0, "비활성 명령이 실행되었습니다.");
+
     var logDirectory = Path.Combine(testRoot, "logs");
     Directory.CreateDirectory(logDirectory);
     var expiredLog = Path.Combine(logDirectory, "findhistory-2000-01-01.log");
@@ -423,6 +483,17 @@ try
         "복원 후 DB가 백업 시점의 항목 수로 돌아오지 않았습니다.");
     Assert((await database.SearchAsync("added-after-backup", null)).Count == 0,
         "복원 전에 추가한 항목이 백업 복원 후에도 남아 있습니다.");
+    var safetyCopyBytes = await File.ReadAllBytesAsync(safetyCopyPath);
+    var safetyCopyHash = System.Security.Cryptography.SHA256.HashData(safetyCopyBytes);
+    var secondSafetyCopyPath = await database.RestoreFromAsync(backupPath);
+    Assert(!string.Equals(safetyCopyPath, secondSafetyCopyPath, StringComparison.OrdinalIgnoreCase) &&
+           File.Exists(secondSafetyCopyPath) && File.Exists(safetyCopyPath),
+        "반복 복원이 이전 안전 사본을 덮어쓰거나 삭제했습니다.");
+    var retainedSafetyCopyBytes = await File.ReadAllBytesAsync(safetyCopyPath);
+    var retainedSafetyCopyHash = System.Security.Cryptography.SHA256.HashData(retainedSafetyCopyBytes);
+    var repeatedRestoreStats = await database.GetStatsAsync();
+    Assert(safetyCopyHash.SequenceEqual(retainedSafetyCopyHash) && repeatedRestoreStats.UniqueItems == preBackupItemCount,
+        "반복 복원이 이전 안전 사본 내용 또는 복원 결과를 변경했습니다.");
     var invalidBackupPath = Path.Combine(testRoot, "invalid-backup.db");
     await File.WriteAllTextAsync(invalidBackupPath, "not a database");
     await AssertThrowsAsync(() => database.RestoreFromAsync(invalidBackupPath),
@@ -1335,7 +1406,7 @@ try
     await AssertThrowsAsync(() => disposalDatabase.SearchAsync(string.Empty, null),
         "종료된 DB에서 검색을 거부하지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장/복원/필터 내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시, 기록 제어, 폴더·프로젝트 그룹화, 존재 상태 갱신, 저장 공간 정리");
+    Console.WriteLine("PASS: 명령 실패·취소·중복 실행, 로그, 저장/복원/필터 내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시, 기록 제어, 폴더·프로젝트 그룹화, 존재 상태 갱신, 저장 공간 정리");
 }
 finally
 {

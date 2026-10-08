@@ -385,8 +385,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             () => SelectedSavedSearch is not null);
         _autoStartEnabled = TryGetAutoStart(autoStart);
 
-        RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
-        ToggleRecordingCommand = new AsyncCommand(ToggleRecordingAsync, () => !IsBusy);
+        RefreshCommand = new AsyncCommand(RefreshAsync, OnCommandError, () => !IsBusy);
+        ToggleRecordingCommand = new AsyncCommand(ToggleRecordingAsync, OnCommandError, () => !IsBusy);
         OpenCommand = new RelayCommand(OpenSelected, () => SelectedItem is not null);
         RevealCommand = new RelayCommand(RevealSelected, () => SelectedItem is not null);
         ClearSearchCommand = new RelayCommand(() => SearchText = string.Empty, () => SearchText.Length > 0);
@@ -448,6 +448,13 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public AsyncCommand RefreshCommand { get; }
     public AsyncCommand ToggleRecordingCommand { get; }
+
+    private void OnCommandError(Exception exception)
+    {
+        _log.Error("An asynchronous UI command failed.", exception);
+        StatusText = LocalizationManager.Instance.Format(
+            "작업 실패: {0}", "Operation failed: {0}", exception.Message);
+    }
     public RelayCommand OpenCommand { get; }
     public RelayCommand RevealCommand { get; }
     public RelayCommand ClearSearchCommand { get; }
@@ -461,7 +468,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             if (SetField(ref _searchText, value))
             {
                 ClearSearchCommand.RaiseCanExecuteChanged();
-            ClearSavedSearchSelection();
+                ClearSavedSearchSelection();
                 ScheduleReload();
             }
         }
