@@ -41,6 +41,7 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 검색어와 필터 조합을 최대 30개까지 이름을 붙여 로컬에 저장하고 다시 불러오기
 - 파일 열기 및 파일 탐색기에서 위치 열기
 - 검색 결과의 폴더별 그룹 보기와 표시 항목 수 확인
+- 사용자 지정 프로젝트 추가·수정·삭제와 프로젝트별 결과 보기
 - 현재 DB를 다른 폴더로 이동하거나 기존 `findhistory.db` 선택
 - 창을 닫은 뒤에도 시스템 트레이에서 백그라운드 기록
 - 선택적인 Windows 로그인 시 자동 실행
@@ -86,7 +87,15 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 
 **최근 기록** 옆의 **폴더별 보기**를 켜면 현재 표시된 결과를 상위 폴더별로 묶습니다. 그룹 제목에는 폴더 경로와 표시 항목 수를 보여 줍니다. 경로의 대소문자는 구분하지 않습니다. 웹 주소와 기타 경로는 별도 그룹으로 표시합니다. 폴더 항목 자체는 해당 폴더의 상위 폴더에 포함합니다. 그룹 안의 항목 순서는 기존 결과 순서를 유지합니다. 기본값은 꺼짐이며 설정은 재시작 후에도 유지됩니다.
 
-그룹화는 검색 조건과 내보내기 범위를 바꾸지 않습니다. 그룹의 항목 수는 전체 DB 개수가 아니라 화면에 표시된 최대 1,000개 결과 기준입니다. 사용자 지정 프로젝트 그룹과 그룹 접기·펼치기는 아직 제공하지 않습니다.
+그룹화는 검색 조건과 내보내기 범위를 바꾸지 않습니다. 그룹의 항목 수는 전체 DB 개수가 아니라 화면에 표시된 최대 1,000개 결과 기준입니다. 그룹 접기·펼치기는 아직 제공하지 않습니다.
+
+### 프로젝트별 보기
+
+**최근 기록 → 프로젝트 관리**에서 **새 프로젝트**를 누릅니다. 프로젝트 이름을 입력하고 **폴더 선택**으로 기준 폴더를 지정합니다. **저장**을 누르면 로컬 설정에 보관합니다. 목록의 프로젝트를 선택하면 이름과 기준 폴더를 수정할 수 있습니다. **삭제**는 프로젝트 설정만 지웁니다. 파일과 열기 기록은 지우지 않습니다.
+
+**프로젝트별 보기**를 켜면 표시된 검색 결과를 프로젝트 이름으로 묶습니다. 프로젝트마다 기준 폴더 하나를 지정하며 하위 폴더도 포함합니다. 폴더가 겹치면 가장 깊은 기준 폴더를 적용합니다. 대소문자는 구분하지 않습니다. 일치하지 않는 항목과 웹 주소는 **프로젝트 없음**으로 묶습니다. 프로젝트는 최대 30개이며 이름은 1~64자입니다. 이름과 기준 폴더는 중복될 수 없습니다.
+
+프로젝트별 보기와 폴더별 보기는 동시에 켜지지 않습니다. 프로젝트 설정과 보기 방식은 재시작 후에도 유지됩니다. 그룹 안의 항목 순서, 검색 조건, 내보내기 범위는 바꾸지 않습니다. 프로젝트 설정은 DB가 아니라 `settings.json`에 저장됩니다. 기준 폴더가 이동해도 자동으로 추적하지 않습니다. 다른 경로의 링크를 같은 폴더로 해석하지 않습니다.
 
 ### 기록 제어
 
@@ -228,6 +237,7 @@ Your history is not sent to an external server. It remains in the database file 
 - Combines extension, last recorded existence, and folder (including descendants) with date and search terms; removable chips show active filters
 - Refreshes local file and folder existence in background batches
 - Groups displayed search results by parent folder with per-group item counts
+- Adds, edits, and deletes custom projects and groups displayed results by project
 - Saves up to 30 named search combinations locally and restores them later
 - Opens a file or reveals its location in File Explorer
 - Moves the current database or switches to an existing `findhistory.db`
@@ -265,6 +275,14 @@ Date history is subject to limitations in the Windows Recent Items source:
 - When an older FindHistory database is upgraded, each existing `last_seen` value is migrated as an **estimated event**.
 
 For the most accurate date history, enable **background startup at Windows sign-in**.
+
+### Project groups
+
+Open **Recent history → Manage projects** and choose **New project**. Enter a name, choose a root folder, and select **Save**. Select a project in the list to edit its name or root folder. **Delete** removes only the project setting. Files and history are kept.
+
+Enable **Group by project** to group displayed results by project name. Each project has one root folder, including its descendants. The deepest matching root takes priority. Paths are case-insensitive. Unmatched items and web addresses appear under **No project**. You can save up to 30 projects. Names must have 1–64 characters. Names and root folders must be unique.
+
+Project and folder grouping cannot be enabled together. Settings persist across restarts. Grouping preserves the order within each group, search conditions, and export scope. Project settings are stored in `settings.json`, not in the database. Moved folders are not tracked automatically. Alternate paths that link to the same folder are not resolved.
 
 ### Recording controls
 

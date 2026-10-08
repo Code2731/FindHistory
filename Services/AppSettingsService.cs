@@ -24,6 +24,60 @@ public sealed class AppSettingsService
     public string Language => _settings.Language;
 
     public bool FolderGroupingEnabled => _settings.FolderGroupingEnabled;
+    public bool ProjectGroupingEnabled => _settings.ProjectGroupingEnabled;
+    public IReadOnlyList<ProjectDefinition> Projects => _settings.Projects.ToArray();
+
+    public void SetProjectGrouping(bool enabled)
+    {
+        var updated = _settings with
+        {
+            ProjectGroupingEnabled = enabled,
+            FolderGroupingEnabled = enabled ? false : _settings.FolderGroupingEnabled
+        };
+        Save(updated);
+        _settings = updated;
+    }
+
+    public void SaveProject(ProjectDefinition project)
+    {
+        ArgumentNullException.ThrowIfNull(project);
+        var projects = _settings.Projects.ToList();
+        var index = projects.FindIndex(existing => existing.Id == project.Id);
+        if (index < 0) projects.Add(project);
+        else projects[index] = project;
+        var updated = _settings with { Projects = NormalizeProjects(projects) };
+        Save(updated);
+        _settings = updated;
+    }
+
+    public void RemoveProject(Guid id)
+    {
+        var updated = _settings with { Projects = _settings.Projects.Where(project => project.Id != id).ToArray() };
+        Save(updated);
+        _settings = updated;
+    }
+
+    private static ProjectDefinition[] NormalizeProjects(IEnumerable<ProjectDefinition> projects)
+    {
+        var result = new List<ProjectDefinition>();
+        foreach (var project in projects)
+        {
+            if (project is null || project.Id == Guid.Empty || string.IsNullOrWhiteSpace(project.Name) ||
+                project.Name.Trim().Length > 64)
+                throw new ArgumentException("프로젝트 이름은 1~64자여야 합니다. 프로젝트 ID도 필요합니다.");
+            var normalized = project with
+            {
+                Name = project.Name.Trim(), Folder = ExcludedFolderPathRules.Normalize([project.Folder]).Single()
+            };
+            if (result.Any(existing => existing.Id == normalized.Id ||
+                    string.Equals(existing.Name, normalized.Name, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(existing.Folder, normalized.Folder, StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("프로젝트 이름과 기준 폴더는 중복될 수 없습니다.");
+            result.Add(normalized);
+            if (result.Count > 30) throw new ArgumentException("프로젝트는 최대 30개까지 설정할 수 있습니다.");
+        }
+        return result.ToArray();
+    }
     public bool RecordingPaused => _settings.RecordingPaused;
     public IReadOnlyList<string> ExcludedFolders => _settings.ExcludedFolders.ToArray();
 
@@ -55,7 +109,11 @@ public sealed class AppSettingsService
 
     public void SetFolderGrouping(bool enabled)
     {
-        var updatedSettings = _settings with { FolderGroupingEnabled = enabled };
+        var updatedSettings = _settings with
+        {
+            FolderGroupingEnabled = enabled,
+            ProjectGroupingEnabled = enabled ? false : _settings.ProjectGroupingEnabled
+        };
         Save(updatedSettings);
         _settings = updatedSettings;
     }
@@ -155,7 +213,9 @@ public sealed class AppSettingsService
             return settings with
             {
                 SavedSearches = settings.SavedSearches ?? [],
-                ExcludedFolders = ExcludedFolderPathRules.Normalize(settings.ExcludedFolders ?? [])
+                ExcludedFolders = ExcludedFolderPathRules.Normalize(settings.ExcludedFolders ?? []),
+                Projects = NormalizeProjects(settings.Projects ?? []),
+                FolderGroupingEnabled = !settings.ProjectGroupingEnabled && settings.FolderGroupingEnabled
             };
         }
         catch (FileNotFoundException)
@@ -184,6 +244,8 @@ public sealed class AppSettingsService
         public bool AutoBackupEnabled { get; init; }
         public int AutoBackupRetention { get; init; } = 7;
         public bool FolderGroupingEnabled { get; init; }
+        public bool ProjectGroupingEnabled { get; init; }
+        public ProjectDefinition[] Projects { get; init; } = [];
         public bool RecordingPaused { get; init; }
         public DateTimeOffset? RecordingResumeAfterUtc { get; init; }
         public string[] ExcludedFolders { get; init; } = [];

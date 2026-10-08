@@ -47,6 +47,9 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private void OnProjectsClick(object sender, RoutedEventArgs e) =>
+        new ProjectSettingsWindow(_viewModel) { Owner = this }.ShowDialog();
+
     private void OnPreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.K && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))

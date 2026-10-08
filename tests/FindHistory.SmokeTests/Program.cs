@@ -1054,6 +1054,99 @@ try
         "폴더 그룹 이름이 영어로 번역되지 않았습니다.");
     LocalizationManager.Instance.SetLanguage("ko");
 
+    var projectsPath = Path.Combine(testRoot, "projects.json");
+    var projectSettings = new AppSettingsService(projectsPath);
+    var workProject = new ProjectDefinition(Guid.NewGuid(), " Work ", @"D:\GroupTest\Work\");
+    var nestedProject = new ProjectDefinition(Guid.NewGuid(), "Nested", @"D:\GroupTest\Work\Nested");
+    Assert(!projectSettings.ProjectGroupingEnabled && projectSettings.Projects.Count == 0,
+        "새 설정에서 프로젝트 보기가 활성화되어 있습니다.");
+    projectSettings.SaveProject(workProject);
+    projectSettings.SaveProject(nestedProject);
+    projectSettings.SetFolderGrouping(true);
+    projectSettings.SetProjectGrouping(true);
+    var restoredProjects = new AppSettingsService(projectsPath);
+    Assert(restoredProjects.ProjectGroupingEnabled && !restoredProjects.FolderGroupingEnabled &&
+           restoredProjects.Projects.Count == 2 && restoredProjects.Projects[0].Name == "Work" &&
+           restoredProjects.Projects[0].Folder == @"D:\GroupTest\Work",
+        "프로젝트 설정의 정규화·재시작 복원·보기 배타 적용이 실패했습니다.");
+    var projectItems = groupingItems.Append(groupingBaseItem with
+    {
+        Id = 7, TargetPath = @"D:\GroupTest\Work\Nested\nested.txt", DisplayName = "nested.txt"
+    }).ToArray();
+    var projectView = ProjectGrouping.CreateView(projectItems, restoredProjects.Projects);
+    var projectGroups = projectView.Groups!.Cast<System.Windows.Data.CollectionViewGroup>().ToArray();
+    Assert(projectGroups.Length == 3 && projectGroups.Sum(group => group.ItemCount) == projectItems.Length &&
+           projectGroups.Single(group => (string)group.Name == "프로젝트: Work").ItemCount == 2 &&
+           projectGroups.Single(group => (string)group.Name == "프로젝트: Nested").ItemCount == 1 &&
+           projectGroups.Single(group => (string)group.Name == "프로젝트 없음").ItemCount == 4,
+        "프로젝트 그룹화의 대소문자·하위 폴더·형제 경계·미지정 항목이 올바르지 않습니다.");
+    Assert(ProjectGrouping.GetGroupName(nestedProject.Folder, restoredProjects.Projects) == "프로젝트: Nested" &&
+           ProjectGrouping.GetGroupName("invalid\0path", restoredProjects.Projects) == "프로젝트 없음" &&
+           ProjectGrouping.CreateView([], restoredProjects.Projects).IsEmpty,
+        "프로젝트 기준 폴더 자체·잘못된 경로·빈 결과 처리가 실패했습니다.");
+    Assert(projectGroups.Single(group => (string)group.Name == "프로젝트: Work").Items
+               .Cast<RecentItem>().Select(item => item.Id).SequenceEqual([1L, 2L]) &&
+           projectView.Cast<RecentItem>().All(item => projectItems.Any(original => ReferenceEquals(item, original))),
+        "프로젝트 그룹화가 결과 순서 또는 원본 항목을 변경했습니다.");
+    LocalizationManager.Instance.SetLanguage("en");
+    Assert(ProjectGrouping.GetGroupName("https://example.com", restoredProjects.Projects) == "No project" &&
+           ProjectGrouping.GetGroupName(groupingBaseItem.TargetPath, restoredProjects.Projects) == "Project: Work",
+        "프로젝트 그룹 이름의 영어 번역이 실패했습니다.");
+    LocalizationManager.Instance.SetLanguage("ko");
+    foreach (var invalid in new[]
+    {
+        workProject with { Id = Guid.NewGuid(), Name = "work", Folder = @"D:\Other" },
+        workProject with { Id = Guid.NewGuid(), Name = "Other" },
+        workProject with { Name = " " }, workProject with { Name = new string('x', 65) },
+        workProject with { Folder = "relative" }, workProject with { Id = Guid.Empty }
+    })
+        await AssertThrowsAsync(() => Task.Run(() => projectSettings.SaveProject(invalid)),
+            "중복·빈 이름·길이·상대 경로·빈 ID 프로젝트를 거부하지 않았습니다.");
+    Assert(projectSettings.Projects.Count == 2, "검증 실패가 프로젝트 설정을 변경했습니다.");
+    projectSettings.SaveProject(workProject with { Name = "Renamed" });
+    Assert(new AppSettingsService(projectsPath).Projects.Single(project => project.Id == workProject.Id).Name == "Renamed",
+        "프로젝트 수정이 저장되지 않았습니다.");
+    projectSettings.RemoveProject(nestedProject.Id);
+    Assert(new AppSettingsService(projectsPath).Projects.Count == 1 &&
+           ProjectGrouping.GetGroupName(@"D:\GroupTest\Work\Nested\nested.txt", projectSettings.Projects) == "프로젝트: Renamed",
+        "프로젝트 삭제 후 상위 프로젝트가 적용되지 않았습니다.");
+    projectSettings.SetFolderGrouping(true);
+    Assert(projectSettings.FolderGroupingEnabled && !projectSettings.ProjectGroupingEnabled,
+        "폴더 보기 활성화가 프로젝트 보기를 해제하지 않았습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SaveProject(workProject)),
+        "프로젝트 저장 실패를 감지하지 못했습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => blockedSettings.SetProjectGrouping(true)),
+        "프로젝트 보기 저장 실패를 감지하지 못했습니다.");
+    Assert(blockedSettings.Projects.Count == 0 && !blockedSettings.ProjectGroupingEnabled,
+        "프로젝트 저장 실패 후 메모리 설정이 변경되었습니다.");
+    var limitedProjects = new AppSettingsService(Path.Combine(testRoot, "project-limit.json"));
+    for (var index = 0; index < 30; index++)
+        limitedProjects.SaveProject(new ProjectDefinition(Guid.NewGuid(), "Project " + index, @"D:\Limit\" + index));
+    await AssertThrowsAsync(() => Task.Run(() => limitedProjects.SaveProject(workProject)),
+        "프로젝트 30개 상한이 적용되지 않았습니다.");
+    Assert(limitedProjects.Projects.Count == 30, "프로젝트 상한 실패 후 목록이 변경되었습니다.");
+    var failedProjectsPath = Path.Combine(testRoot, "failed-projects.json");
+    var failedProjects = new AppSettingsService(failedProjectsPath);
+    failedProjects.SaveProject(workProject);
+    failedProjects.SetProjectGrouping(true);
+    Directory.CreateDirectory(failedProjectsPath + ".tmp");
+    await AssertThrowsAsync(() => Task.Run(() => failedProjects.RemoveProject(workProject.Id)),
+        "프로젝트 삭제 저장 실패를 감지하지 못했습니다.");
+    await AssertThrowsAsync(() => Task.Run(() => failedProjects.SetFolderGrouping(true)),
+        "보기 전환 저장 실패를 감지하지 못했습니다.");
+    Assert(failedProjects.Projects.Count == 1 && failedProjects.ProjectGroupingEnabled &&
+           !failedProjects.FolderGroupingEnabled && new AppSettingsService(failedProjectsPath).Projects.Count == 1,
+        "저장 실패가 프로젝트 목록 또는 보기 설정을 변경했습니다.");
+
+    var fixtureIndex = Array.IndexOf(args, "--project-ui-db");
+    if (fixtureIndex >= 0 && fixtureIndex + 1 < args.Length)
+    {
+        await using var fixtureDatabase = new RecentDatabase(args[fixtureIndex + 1]);
+        await fixtureDatabase.InitializeAsync();
+        await fixtureDatabase.UpsertManyAsync(projectItems.Select(item => new RecentItemCandidate(
+            item.TargetPath, item.DisplayName, item.Extension, item.ItemKind, item.SourceLinkPath, item.LastSeen, item.Exists)).ToArray());
+    }
+
     var existenceDatabasePath = Path.Combine(testRoot, "existence.db");
     await using (var existenceDatabase = new RecentDatabase(existenceDatabasePath))
     {
@@ -1242,7 +1335,7 @@ try
     await AssertThrowsAsync(() => disposalDatabase.SearchAsync(string.Empty, null),
         "종료된 DB에서 검색을 거부하지 않았습니다.");
 
-    Console.WriteLine("PASS: 로그, 저장/복원/필터 내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시, 존재 상태 갱신, 저장 공간 정리");
+    Console.WriteLine("PASS: 로그, 저장/복원/필터 내보내기, 검색, 날짜 경계/DST, 활동 집계, 진단, 기존 DB 이관, DB 이동/전환 복구, 설정 장애 복구, 실시간 감시, 기록 제어, 폴더·프로젝트 그룹화, 존재 상태 갱신, 저장 공간 정리");
 }
 finally
 {

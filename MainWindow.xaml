@@ -311,6 +311,10 @@
                 <CheckBox Content="{loc:Translate '폴더별 보기'}" Margin="20,0,0,0" VerticalAlignment="Center"
                           IsChecked="{Binding FolderGroupingEnabled, Mode=TwoWay}"
                           ToolTip="{loc:Translate '현재 표시된 결과를 상위 폴더별로 묶습니다. 검색 조건과 내보내기 범위는 바꾸지 않습니다.'}" />
+                <CheckBox Content="{loc:Translate '프로젝트별 보기'}" Margin="16,0,0,0" VerticalAlignment="Center"
+                          IsChecked="{Binding ProjectGroupingEnabled, Mode=TwoWay}" />
+                <Button Content="{loc:Translate '프로젝트 관리'}" Click="OnProjectsClick"
+                        Style="{StaticResource QuietButton}" Margin="8,0,0,0" MinHeight="28" Padding="8,4" FontSize="12" />
             </StackPanel>
             <TextBlock Grid.Column="1" Text="{Binding SummaryText}"
                        Style="{StaticResource SecondaryText}" FontSize="12" VerticalAlignment="Center" />
@@ -333,6 +337,11 @@
                           VirtualizingPanel.VirtualizationMode="Recycling">
                     <DataGrid.GroupStyle>
                         <GroupStyle>
+                            <GroupStyle.Panel>
+                                <ItemsPanelTemplate>
+                                    <DataGridRowsPresenter />
+                                </ItemsPanelTemplate>
+                            </GroupStyle.Panel>
                             <GroupStyle.HeaderTemplate>
                                 <DataTemplate>
                                     <Border Background="{StaticResource AccentContainerBrush}" Padding="14,8"

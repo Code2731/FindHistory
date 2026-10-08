@@ -244,7 +244,58 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public ICollectionView ResultsView => _resultsView ??= FolderGrouping.CreateView(Items, FolderGroupingEnabled);
+    public ICollectionView ResultsView => _resultsView ??= CreateResultsView();
+
+    private ICollectionView CreateResultsView() => ProjectGroupingEnabled
+        ? ProjectGrouping.CreateView(Items, Projects)
+        : FolderGrouping.CreateView(Items, FolderGroupingEnabled);
+
+    public IReadOnlyList<ProjectDefinition> Projects => _settings.Projects;
+
+    public bool ProjectGroupingEnabled
+    {
+        get => _settings.ProjectGroupingEnabled;
+        set
+        {
+            if (value == ProjectGroupingEnabled) return;
+            try
+            {
+                _settings.SetProjectGrouping(value);
+                RebuildResultsView();
+            }
+            catch (Exception ex)
+            {
+                _log.Error("Saving project grouping failed.", ex);
+                StatusText = LocalizationManager.Instance.Format(
+                    "프로젝트 보기 저장 실패: {0}", "Saving project view failed: {0}", ex.Message);
+            }
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(FolderGroupingEnabled));
+        }
+    }
+
+    public bool SaveProject(ProjectDefinition project) => ChangeProjects(() => _settings.SaveProject(project));
+    public bool RemoveProject(Guid id) => ChangeProjects(() => _settings.RemoveProject(id));
+
+    private bool ChangeProjects(Action save)
+    {
+        try
+        {
+            save();
+            OnPropertyChanged(nameof(Projects));
+            RebuildResultsView();
+            StatusText = LocalizationManager.Instance.Translate("프로젝트 설정을 저장했습니다.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Saving projects failed.", ex);
+            StatusText = LocalizationManager.Instance.Format(
+                "프로젝트 저장 실패: {0}", "Saving projects failed: {0}",
+                LocalizationManager.Instance.Translate(ex.Message));
+            return false;
+        }
+    }
 
     public bool FolderGroupingEnabled
     {
@@ -264,13 +315,14 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                     "폴더 그룹화 설정 저장 실패: {0}", "Saving folder grouping failed: {0}", ex.Message);
             }
             OnPropertyChanged();
+            OnPropertyChanged(nameof(ProjectGroupingEnabled));
         }
     }
 
     private void RebuildResultsView()
     {
         var selectedId = SelectedItem?.Id;
-        _resultsView = FolderGrouping.CreateView(Items, FolderGroupingEnabled);
+        _resultsView = CreateResultsView();
         OnPropertyChanged(nameof(ResultsView));
         SelectedItem = selectedId is null ? null : Items.FirstOrDefault(item => item.Id == selectedId);
         OnPropertyChanged(nameof(SelectedItem));

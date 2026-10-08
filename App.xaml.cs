@@ -35,6 +35,7 @@ public partial class App : System.Windows.Application
         var isScreenshotRun = screenshotsEnabled &&
                               (HasOutputArgument(e.Args, "--screenshot") ||
                                HasOutputArgument(e.Args, "--screenshot-settings") ||
+                               HasOutputArgument(e.Args, "--screenshot-projects") ||
                                HasOutputArgument(e.Args, "--screenshot-diagnostics") ||
                                HasOutputArgument(e.Args, "--screenshot-inactive-selection"));
         var mutexName = isScreenshotRun
@@ -111,7 +112,20 @@ public partial class App : System.Windows.Application
                 _existenceMonitor.Start();
             }
 
-            if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
+            var projectsScreenshotIndex = isScreenshotRun
+                ? Array.FindIndex(e.Args, arg => arg.Equals("--screenshot-projects", StringComparison.OrdinalIgnoreCase))
+                : -1;
+            if (projectsScreenshotIndex >= 0 && projectsScreenshotIndex + 1 < e.Args.Length)
+            {
+                var projectsWindow = new ProjectSettingsWindow(_viewModel);
+                projectsWindow.Show();
+                projectsWindow.UpdateLayout();
+                await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                SaveScreenshot(projectsWindow, e.Args[projectsScreenshotIndex + 1]);
+                projectsWindow.Close();
+                await ExitApplicationAsync();
+            }
+            else if (settingsScreenshotIndex >= 0 && settingsScreenshotIndex + 1 < e.Args.Length)
             {
                 var settingsWindow = new StorageSettingsWindow(_viewModel);
                 settingsWindow.Show();
