@@ -178,7 +178,7 @@ FindHistory가 읽는 범위는 Windows의 다음 최근 항목 폴더입니다.
 
 DB 저장·검색·마이그레이션·DB 이동/전환·설정 유지·실시간 파일 감시는 스모크 테스트로 검증할 수 있습니다.
 
-히트맵 날짜 선택은 실제 WPF 디스패처와 화면 모델로 검증합니다. 테스트는 임시 DB·설정·감시 폴더를 사용합니다. 사용자 기록과 자동 실행 설정은 변경하지 않습니다.
+히트맵 날짜 선택, 저장 검색 적용, 필터 칩 해제와 전체 초기화는 실제 WPF 디스패처와 화면 모델로 검증합니다. 테스트는 임시 DB·설정·감시 폴더를 사용합니다. 사용자 기록과 자동 실행 설정은 변경하지 않습니다.
 
 ```powershell
 dotnet run --project tests\FindHistory.SmokeTests -c Release
@@ -385,7 +385,7 @@ Grouping does not change search filters or export scope. Group counts describe t
 
 The smoke-test project covers storage, search, migration, database move/switch, settings persistence, and live file watching.
 
-Heatmap date selection is tested with the real WPF dispatcher and view model. Tests use temporary databases, settings, and Recent Items folders. They do not change your history or startup settings.
+Heatmap date selection, saved-search application, individual filter removal, and filter reset are tested with the real WPF dispatcher and view model. Tests use temporary databases, settings, and Recent Items folders. They do not change your history or startup settings.
 
 ```powershell
 dotnet run --project tests\FindHistory.SmokeTests -c Release

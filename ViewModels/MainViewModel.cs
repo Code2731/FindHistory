@@ -50,7 +50,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private IReadOnlyList<DateRangeOption> _dateRanges = BuildDateRanges();
     private IReadOnlyList<SavedSearch> _savedSearches;
     private SavedSearch? _selectedSavedSearch;
-    private bool _isApplyingSavedSearch;
 
     public IReadOnlyList<LanguageOption> LanguageOptions { get; } =
         [new("ko", "한국어"), new("en", "English")];
@@ -118,26 +117,62 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 if (SetField(ref _selectedSavedSearch, null)) RemoveSavedSearchCommand.RaiseCanExecuteChanged();
                 return;
             }
-            if (!SetField(ref _selectedSavedSearch, value)) return;
-            RemoveSavedSearchCommand.RaiseCanExecuteChanged();
-            _isApplyingSavedSearch = true;
-            try
-            {
-                SearchText = value.SearchText;
-                ExtensionFilter = value.Extension;
-                SelectedExistence = ExistenceOptions.First(option => option.Exists == value.Exists);
-                FolderFilter = value.Folder;
-                if (value.IsSpecificDate)
-                {
-                    SpecificDate = value.SpecificDate ?? DateTime.Today;
-                }
-                SelectedDateRange = SavedSearchDateRangeResolver.Resolve(value, DateRanges);
-            }
-            finally
-            {
-                _isApplyingSavedSearch = false;
-            }
+            if (value == _selectedSavedSearch) return;
+            ApplySearchState(value.SearchText, value.Extension,
+                ExistenceOptions.First(option => option.Exists == value.Exists), value.Folder,
+                value.IsSpecificDate ? value.SpecificDate ?? DateTime.Today : SpecificDate,
+                SavedSearchDateRangeResolver.Resolve(value, DateRanges), value);
         }
+    }
+
+    private void ApplySearchState(string? searchText, string? extension, ExistenceOption existence,
+        string? folder, DateTime? specificDate, DateRangeOption range, SavedSearch? preset)
+    {
+        searchText ??= string.Empty;
+        extension ??= string.Empty;
+        folder ??= string.Empty;
+        specificDate = (specificDate ?? DateTime.Today).Date;
+        var searchChanged = _searchText != searchText;
+        var extensionChanged = _extensionFilter != extension;
+        var existenceChanged = _selectedExistence != existence;
+        var folderChanged = _folderFilter != folder;
+        var dateChanged = _specificDate != specificDate;
+        var rangeChanged = _selectedDateRange != range;
+        var presetChanged = _selectedSavedSearch != preset;
+
+        // Assign all conditions before notifying bindings. No observer should see a partial preset.
+        _searchText = searchText;
+        _extensionFilter = extension;
+        _selectedExistence = existence;
+        _folderFilter = folder;
+        _specificDate = specificDate;
+        _selectedDateRange = range;
+        _selectedSavedSearch = preset;
+
+        if (presetChanged)
+        {
+            OnPropertyChanged(nameof(SelectedSavedSearch));
+            RemoveSavedSearchCommand.RaiseCanExecuteChanged();
+        }
+        if (searchChanged)
+        {
+            OnPropertyChanged(nameof(SearchText));
+            ClearSearchCommand.RaiseCanExecuteChanged();
+        }
+        if (extensionChanged) OnPropertyChanged(nameof(ExtensionFilter));
+        if (existenceChanged) OnPropertyChanged(nameof(SelectedExistence));
+        if (folderChanged) OnPropertyChanged(nameof(FolderFilter));
+        if (dateChanged) OnPropertyChanged(nameof(SpecificDate));
+        if (rangeChanged)
+        {
+            OnPropertyChanged(nameof(SelectedDateRange));
+            OnPropertyChanged(nameof(IsSpecificDateSelected));
+        }
+        if (extensionChanged || existenceChanged || folderChanged || rangeChanged || (dateChanged && range.IsSpecificDate))
+            OnPropertyChanged(nameof(FilterChips));
+        if (dateChanged || rangeChanged) UpdateActivitySelection();
+        if (searchChanged || extensionChanged || existenceChanged || folderChanged || rangeChanged ||
+            (dateChanged && range.IsSpecificDate)) ScheduleReload();
     }
 
     public IReadOnlyList<FilterChip> FilterChips
@@ -218,7 +253,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private void ClearSavedSearchSelection()
     {
-        if (!_isApplyingSavedSearch && SelectedSavedSearch is not null)
+        if (SelectedSavedSearch is not null)
         {
             SelectedSavedSearch = null;
         }
@@ -373,13 +408,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         _savedSearches = _settings.SavedSearches.ToArray();
         ChooseFolderCommand = new RelayCommand(ChooseFolder);
         RemoveFilterCommand = new RelayCommand<FilterChip>(RemoveFilter);
-        ClearFiltersCommand = new RelayCommand(() =>
-        {
-            ExtensionFilter = string.Empty;
-            FolderFilter = string.Empty;
-            SelectedExistence = ExistenceOptions[0];
-            SelectedDateRange = DateRanges[0];
-        });
+        ClearFiltersCommand = new RelayCommand(() => ApplySearchState(
+            SearchText, string.Empty, ExistenceOptions[0], string.Empty, SpecificDate, DateRanges[0], null));
         SaveSearchCommand = new RelayCommand(SaveCurrentSearch);
         RemoveSavedSearchCommand = new RelayCommand(RemoveSelectedSavedSearch,
             () => SelectedSavedSearch is not null);

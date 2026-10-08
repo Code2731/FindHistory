@@ -16,7 +16,11 @@ internal static class HeatmapViewModelTests
                 var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
                 application.Startup += async (_, _) =>
                 {
-                    try { await VerifyAsync(testRoot); }
+                    try
+                    {
+                        await VerifyAsync(testRoot);
+                        await SavedSearchViewModelTests.VerifyAsync(testRoot);
+                    }
                     catch (Exception ex) { failure = ex; }
                     finally { application.Shutdown(); }
                 };
