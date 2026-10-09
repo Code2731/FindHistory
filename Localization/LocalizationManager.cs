@@ -63,7 +63,7 @@ public sealed class LocalizationManager : INotifyPropertyChanged
             ["조회할 날짜를 선택합니다"] = "Choose a date to view",
             ["새로고침"] = "Refresh",
             ["확장자"] = "Extension",
-            ["예: mp4, .pdf 또는 *.txt · 단일 확장자를 입력하세요"] = "Example: mp4, .pdf, or *.txt · Enter one extension",
+        ["예: mp4, mkv, avi · 쉼표, 세미콜론 또는 공백으로 구분하세요"] = "Example: mp4, mkv, avi · Separate with commas, semicolons, or spaces",
             ["폴더 선택"] = "Choose folder",
             ["선택한 폴더와 하위 폴더의 기록을 검색합니다"] = "Search history in this folder and its subfolders",
             ["필터 초기화"] = "Clear filters",

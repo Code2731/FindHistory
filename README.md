@@ -36,7 +36,8 @@ Windows의 **최근 항목** 목록은 보관 기간과 개수가 제한적입�
 - 최근 16주의 날짜별 활동량을 히트맵으로 확인하고 날짜를 눌러 바로 필터링
 - 파일명과 전체 경로 검색, 여러 검색어 조합, `*`/`?` 와일드카드 지원
 - 전체 기간 / 오늘 / 최근 7일 / 최근 30일 / 최근 1년 / 날짜 지정 필터
-- 확장자·저장된 존재 상태·폴더(하위 폴더 포함)를 날짜·검색어와 AND 조건으로 조합하고 필터 칩으로 개별 해제
+- 확장자 필터는 `mp4, mkv, avi`처럼 여러 확장자를 OR 조건으로 지정합니다. 쉼표, 세미콜론, 공백으로 구분합니다. `.pdf`와 `*.txt` 형식도 지원합니다. 대소문자를 구분하지 않습니다.
+- 확장자·저장된 존재 상태·폴더(하위 폴더 포함)를 날짜·검색어와 AND 조건으로 조합하고 필터 칩으로 개별 해제합니다. 확장자 칩을 해제하면 확장자 목록 전체를 해제합니다. 저장 검색과 내보내기에도 같은 조건을 적용합니다.
 - 로컬 파일·폴더의 존재 상태를 백그라운드에서 순차 갱신
 - 검색어와 필터 조합을 최대 30개까지 이름을 붙여 로컬에 저장하고 다시 불러오기
 - 파일 열기 및 파일 탐색기에서 위치 열기
@@ -242,7 +243,8 @@ Your history is not sent to an external server. It remains in the database file 
 - Shows the last 16 weeks in an activity heatmap and filters by a clicked date
 - Searches file names and full paths with multiple terms and `*`/`?` wildcards
 - All time / Today / Last 7 days / Last 30 days / Last year / Specific date filters
-- Combines extension, last recorded existence, and folder (including descendants) with date and search terms; removable chips show active filters
+- The extension filter accepts multiple extensions, such as `mp4, mkv, avi`, with OR matching. Separate extensions with commas, semicolons, or spaces. `.pdf` and `*.txt` forms are also supported. Matching is case-insensitive.
+- Combines extension, last recorded existence, and folder (including descendants) with date and search terms using AND matching. Removing the extension chip clears the entire extension list. Saved searches and exports use the same conditions.
 - Refreshes local file and folder existence in background batches
 - Groups displayed search results by parent folder with per-group item counts
 - Adds, edits, and deletes custom projects and groups displayed results by project

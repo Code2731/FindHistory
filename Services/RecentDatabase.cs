@@ -1352,8 +1352,21 @@ public sealed class RecentDatabase : IDisposable, IAsyncDisposable
         var conditions = new List<string>();
         if (!string.IsNullOrWhiteSpace(filters?.Extension))
         {
-            conditions.Add("r.extension = $extension COLLATE NOCASE");
-            command.Parameters.AddWithValue("$extension", filters.Extension.Trim().TrimStart('*', '.'));
+            var extensions = filters.Extension
+                .Split(new[] { ',', ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(extension => extension.TrimStart('*', '.'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (extensions.Length > 0)
+            {
+                var parameters = new string[extensions.Length];
+                for (var index = 0; index < extensions.Length; index++)
+                {
+                    parameters[index] = $"$extension{index}";
+                    command.Parameters.AddWithValue(parameters[index], extensions[index]);
+                }
+                conditions.Add($"r.extension COLLATE NOCASE IN ({string.Join(", ", parameters)})");
+            }
         }
         if (filters?.Exists is { } exists)
         {

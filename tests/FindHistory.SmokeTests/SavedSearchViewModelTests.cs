@@ -122,6 +122,17 @@ internal static class SavedSearchViewModelTests
         await WaitUntilAsync(() => vm.Items.Count == 4);
         Check(vm.SearchText == string.Empty && vm.ExtensionFilter == string.Empty && vm.FolderFilter == string.Empty,
             "누락된 저장 검색 문자열이 빈 조건으로 복구되지 않았습니다.");
+
+        var multiPreset = preset with { Id = Guid.NewGuid(), Name = "Multiple extensions", Extension = "*.TXT, .pdf; txt" };
+        settings.AddSavedSearch(multiPreset);
+        var multiRestored = new AppSettingsService(Path.Combine(root, "settings.json"));
+        vm.SelectedSavedSearch = multiRestored.SavedSearches.Single(item => item.Id == multiPreset.Id);
+        await WaitUntilAsync(() => vm.Items.Count == 2 && vm.Items.Any(item => item.Extension.Equals("pdf", StringComparison.OrdinalIgnoreCase)));
+        Check(vm.ExtensionFilter == multiPreset.Extension && vm.FilterChips.Count(chip => chip.Key == "extension") == 1,
+            "다중 확장자 저장 검색 또는 필터 칩이 유지되지 않았습니다.");
+        vm.RemoveFilterCommand.Execute(vm.FilterChips.Single(chip => chip.Key == "extension"));
+        Check(vm.ExtensionFilter == string.Empty && vm.SelectedSavedSearch is null,
+            "확장자 칩이 다중 확장자 목록 전체를 해제하지 않았습니다.");
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

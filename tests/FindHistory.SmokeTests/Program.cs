@@ -282,6 +282,45 @@ try
         filters: new HistoryFilters(".txt", true, literalFolder))).Items.Count == 1,
         "폴더의 LIKE 특수문자를 리터럴로 처리하거나 하위 폴더를 포함하지 못했습니다.");
 
+    await using (var multiExtensionDatabase = new RecentDatabase(Path.Combine(testRoot, "multi-extension.db")))
+    {
+        await multiExtensionDatabase.InitializeAsync();
+        var multiFolder = Path.Combine(testRoot, "multi-extension");
+        RecentItemCandidate MultiItem(string parent, string extension, bool exists, DateTimeOffset openedAt) =>
+            new(Path.Combine(parent, "sample." + extension), "sample." + extension, extension,
+                "파일", Path.Combine(parent, extension + ".lnk"), openedAt, exists);
+        await multiExtensionDatabase.UpsertManyAsync(new[]
+        {
+            MultiItem(multiFolder, "TXT", true, boundaryStart),
+            MultiItem(Path.Combine(multiFolder, "nested"), "pdf", true, boundaryStart),
+            MultiItem(multiFolder, "MP4", false, boundaryStart),
+            MultiItem(multiFolder, "AVI", true, boundaryEnd),
+            MultiItem(Path.Combine(testRoot, "outside"), "TXT", true, boundaryStart)
+        });
+        var multiFilters = new HistoryFilters("*.txt, .PDF; TXT\t mp4\navi", true, multiFolder);
+        var multiResults = await multiExtensionDatabase.SearchWithStatsAsync("sample", boundaryRange,
+            filters: multiFilters);
+        Assert(multiResults.Items.Count == 2 && multiResults.Items.Select(item => item.Extension)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(new[] { "TXT", "PDF" }),
+            "다중 확장자 OR 조건 또는 날짜·폴더·존재 상태 AND 조건이 동작하지 않습니다.");
+        Assert((await multiExtensionDatabase.SearchWithStatsAsync("", null,
+            filters: new HistoryFilters("txt,pdf"))).Items.Count == 3,
+            "다중 확장자가 모든 일치 항목을 반환하지 않았습니다.");
+        Assert((await multiExtensionDatabase.SearchWithStatsAsync("", null,
+            filters: new HistoryFilters(", ; \t"))).Items.Count == 5,
+            "구분자만 입력한 확장자 필터가 빈 조건으로 처리되지 않았습니다.");
+        Assert((await multiExtensionDatabase.SearchWithStatsAsync("", null,
+            filters: new HistoryFilters("txt') OR 1=1 --"))).Items.Count == 0,
+            "확장자 입력이 SQL 조건으로 실행되었습니다.");
+        var multiJson = Path.Combine(testRoot, "multi-extension.json");
+        var multiCsv = Path.Combine(testRoot, "multi-extension.csv");
+        await multiExtensionDatabase.ExportSearchToAsync(multiJson, "json", "sample", boundaryRange, multiFilters);
+        await multiExtensionDatabase.ExportSearchToAsync(multiCsv, "csv", "sample", boundaryRange, multiFilters);
+        Assert((await ReadExportItemsAsync(multiJson)).Length == 2 &&
+               (await File.ReadAllLinesAsync(multiCsv)).Length == 3,
+            "다중 확장자 내보내기 결과가 검색 결과와 다릅니다.");
+    }
+
     var pacific = TimeZoneInfo.FindSystemTimeZoneById("Pacific Standard Time");
     var springDstRange = HistoryDateRangeFactory.CreateLocalCalendarRange(
         new DateTime(2026, 3, 8), new DateTime(2026, 3, 9), "DST 시작", pacific);

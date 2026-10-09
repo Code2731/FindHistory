@@ -152,9 +152,9 @@
                 <WrapPanel Margin="0,10,0,0">
                     <TextBlock Text="{loc:Translate '확장자'}" VerticalAlignment="Center" Margin="4,0,8,0"
                                Style="{StaticResource SecondaryText}" />
-                    <TextBox Width="100" FontSize="12" Padding="10,7" MinHeight="36"
+                    <TextBox Width="160" FontSize="12" Padding="10,7" MinHeight="36"
                              Text="{Binding ExtensionFilter, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="{loc:Translate '예: mp4, .pdf 또는 *.txt · 단일 확장자를 입력하세요'}" />
+                             ToolTip="{loc:Translate '예: mp4, mkv, avi · 쉼표, 세미콜론 또는 공백으로 구분하세요'}" />
                     <ComboBox Width="180" Margin="10,0,0,0" MinHeight="36"
                               ItemsSource="{Binding ExistenceOptions}"
                               SelectedItem="{Binding SelectedExistence}" />
