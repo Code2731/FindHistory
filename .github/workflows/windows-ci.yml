@@ -20,3 +20,6 @@ jobs:
         run: dotnet build FindHistory.sln -c Release --no-restore
       - name: Run smoke tests
         run: dotnet run --project tests/FindHistory.SmokeTests/FindHistory.SmokeTests.csproj -c Release --no-build
+      - name: Test publish directory replacement
+        shell: pwsh
+        run: ./tests/PublishDirectory.Tests.ps1

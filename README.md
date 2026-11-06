@@ -123,13 +123,15 @@ cd FindHistory
 dotnet run
 ```
 
-Release 게시 폴더를 만들려면 다음 명령을 사용합니다.
+Release 배포본을 만들려면 앱을 트레이 메뉴에서 종료한 뒤 PowerShell 7에서 다음 명령을 사용합니다.
 
 ```powershell
-dotnet publish -c Release --self-contained false -o publish
+pwsh -File scripts/Publish-Release.ps1
 ```
 
 생성된 `publish/FindHistory.exe`를 실행합니다. 창의 닫기 버튼은 앱을 시스템 트레이로 보냅니다. 완전히 종료하려면 트레이의 FindHistory 아이콘을 우클릭하고 **종료**를 선택하세요.
+
+스크립트는 Release 빌드와 전체 회귀 테스트를 실행합니다. 런타임 포함 Windows x64 ZIP과 SHA-256을 `artifacts`의 고유한 배포 폴더에 생성합니다. `publish`도 같은 배포본으로 갱신합니다. 기존 `publish`는 `artifacts/publish-before-update-*`에 보관합니다. 교체 전 전체 파일 해시를 확인합니다. DB나 `settings.json`이 배포 폴더에 있으면 중단합니다. GitHub 릴리즈는 자동 게시하지 않습니다.
 
 ### 데이터 저장소와 개인정보
 
@@ -319,13 +321,15 @@ cd FindHistory
 dotnet run
 ```
 
-To create a Release publish directory:
+To create a Release package, exit the app from the tray menu and run this command with PowerShell 7:
 
 ```powershell
-dotnet publish -c Release --self-contained false -o publish
+pwsh -File scripts/Publish-Release.ps1
 ```
 
 Run `publish/FindHistory.exe`. Closing the main window sends the app to the system tray. To quit completely, right-click the FindHistory tray icon and choose **Exit**.
+
+The script runs the Release build and full regression suite. It creates a self-contained Windows x64 ZIP and SHA-256 file in a unique release directory under `artifacts`. It also updates `publish` with the same payload. The previous directory is kept under `artifacts/publish-before-update-*`. All staged file hashes are verified before replacement. Database files or `settings.json` in the payload or existing publish directory stop the update. The script does not publish a GitHub release.
 
 ### Database and privacy
 
